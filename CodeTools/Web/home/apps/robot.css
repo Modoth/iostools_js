@@ -1,0 +1,125 @@
+:host {
+    --top: 30px;
+    padding-top: var(--top);
+    position: relative;
+}
+
+.container {
+    height: calc(100% - var(--top));
+    display: flex;
+    flex-direction: row;
+    justify-content: center;
+    align-items: center;
+}
+
+.panel-wraper {
+    transform: scale(0.95);
+    border-radius: 10px;
+    overflow: hidden;
+    box-shadow: 2px 4px 6px;
+}
+
+.panel {
+    display: flex;
+    flex-direction: column;
+    position: relative;
+    filter: drop-shadow(2px 4px 6px black);
+}
+
+.row {
+    display: flex;
+}
+
+.cell {
+    width: var(--cell-size);
+    height: var(--cell-size);
+}
+
+.robot {
+    width: var(--cell-size);
+    height: var(--cell-size);
+    position: absolute;
+    top: var(--robot-top);
+    left: var(--robot-left);
+    transition: top 0.5s, left 0.5s;
+    border-radius: 50%;
+    background: #fff0;
+    animation: living 1s linear infinite;
+}
+
+.no-animation.robot {
+    transition: none;
+}
+
+.robot.died {
+    animation: none;
+}
+
+.finished {
+    filter: sepia(1);
+    transition: filter 1s;
+}
+
+@keyframes living {
+    50% {
+        background: #fff6;
+    }
+}
+
+.robot::after {
+    content: "🤖";
+}
+
+.cell {
+    position: relative;
+}
+
+.cell>.bg {
+    width: 100%;
+    height: 100%;
+    top: 0;
+    left: 0;
+    position: absolute;
+
+}
+
+.cell.wall,
+.cell.road {
+    background: repeating-radial-gradient(circle at 0.5em 0.05em, transparent, transparent 0.2em, #EDE8D5 0.21em, #EDE8D5 0.3em, transparent 0.31em), repeating-radial-gradient(circle at 0.5em 0.95em, transparent, transparent 0.2em, #EDE8D5 0.21em, #EDE8D5 0.3em, transparent 0.31em);
+    background-size: 1em 1em;
+}
+
+.cell.wall>.bg {
+    background: #a52a2ac0;
+
+}
+
+.cell.road>.bg {
+    background: #547178c0;
+}
+
+.cell.road-block,
+.cell.start,
+.cell.end,
+.robot {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: calc(var(--cell-size) * 0.72);
+    text-shadow: 2px 4px 6px black;
+}
+
+.cell.road-block::after {
+    content: "🪣";
+    z-index: 1;
+}
+
+.cell.start::after {
+    content: "";
+    z-index: 1;
+}
+
+.cell.end::after {
+    content: "🛢️";
+    z-index: 1;
+}

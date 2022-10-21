@@ -1,0 +1,8 @@
+Welcome to Browsix!
+
+For more info, please check out:
+https://github.com/plasma-umass/browsix
+
+Known issues with this shell:
+- 'cd' is not implemented.
+- backspacing past '$' produces "interesting" results

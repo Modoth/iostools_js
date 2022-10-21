@@ -1,0 +1,3 @@
+// pyodide.js pyodide.asm.js
+if(!response.ok)throw new Error(`Failed to load '${url}': request failed.`);return new Uint8Array(await response.arrayBuffer())
+try{return new Uint8Array(await response.arrayBuffer())}catch{throw new Error(`Failed to load '${url}': request failed.`)}

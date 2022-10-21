@@ -1,0 +1,156 @@
+<html>
+<meta charset="utf-8" />
+<style>
+    body {
+        margin: 0;
+        background-color: #ffffff;
+        opacity: 1;
+        background-image: linear-gradient(#f4f4f4 2px, transparent 2px), linear-gradient(90deg, #f4f4f4 2px, transparent 2px), linear-gradient(#f4f4f4 1px, transparent 1px), linear-gradient(90deg, #f4f4f4 1px, #ffffff 1px);
+        background-size: 50px 50px, 50px 50px, 10px 10px, 10px 10px;
+        background-position: -2px -2px, -2px -2px, -1px -1px, -1px -1px;
+        padding-top: 45px;
+    }
+
+    #container {}
+</style>
+<script src="./tf.min.js"></script>
+<script src="./tfjs-vis.umd.min.js"></script>
+<script src="./plotly-2.14.0.min.js"></script>
+<script src="./math.js"></script>
+<div id="scriptContainer"></div>
+
+<script>
+    const objToString = obj => {
+        if (obj) {
+            switch (typeof (obj)) {
+                case 'object':
+                    return obj.toString()
+                case 'array':
+                    return `Array[${obj.length}]`
+                default: break
+            }
+        }
+
+        return JSON.stringify(obj)
+    }
+    const write = (result) => {
+        window.parent.postMessage({
+            result
+        }, "*")
+    }
+    const AsyncFunction = (async function () { }).constructor;
+    const scriptContainer = document.getElementById('scriptContainer');
+    (() => {
+        let inited = false
+        const tryInit = () => {
+            if (inited) {
+                return true
+            }
+            if (!window.tfvis) {
+                return
+            }
+            const containerEle = document.getElementById('container')
+
+            const render_ = window.tfvis.render
+            const render = Object.assign({}, render_)
+            window.tfvis.render = render
+            for (let fn in render_) {
+                render[fn] = (container, ...args) => {
+                    render_[fn](containerEle, ...args)
+                }
+            }
+
+            const show_ = window.tfvis.show
+            const show = Object.assign({}, show_)
+            window.tfvis.show = show
+            for (let fn in show_) {
+                show[fn] = (container, ...args) => {
+                    show_[fn](containerEle, ...args)
+                }
+            }
+
+            const Plotly_ = window.Plotly
+            const Plotly = Object.assign({}, Plotly_)
+            window.Plotly = Plotly
+            for (let fn in Plotly_) {
+                Plotly[fn] = (...args) => {
+                    if (args[0] instanceof HTMLElement || typeof (args[0]) === 'string') {
+                        args = args.slice(1)
+                    }
+                    Plotly_[fn](containerEle, ...args)
+                }
+            }
+
+            const console_ = window.console
+            const console = Object.assign({}, console_)
+            window.console = console
+            for (let fn of ['log']) {
+                console[fn] = async (...args) => {
+                    console_[fn](...args)
+                    for (let arg of args) {
+                        await write(objToString(arg) + '\n')
+                    }
+                }
+            }
+
+            inited = true
+            return true
+        }
+        window.addEventListener('message', async (ev) => {
+            if (ev.source !== window.parent) {
+                return
+            }
+            const { taskId, source } = ev.data
+            const returnMessage = (result, fId) => {
+                window.parent.postMessage({
+                    taskId,
+                    fId,
+                    result
+                }, "*")
+            }
+
+            if (!tryInit()) {
+                returnMessage('Inner Error.', 2)
+                return
+            }
+            try {
+                const HIDE_RES_SURFIX = ';'
+                const showRes = !source.endsWith(HIDE_RES_SURFIX)
+                const script = document.createElement('script')
+                if (source.match(/^\s*await\s/)) {
+                    script.setAttribute('type', 'module')
+                }
+                if (showRes) {
+                    const lines = source.split('\n')
+                    let lastLine = lines.pop()
+                    // lastLine = lastLine.slice(0, -HIDE_RES_SURFIX.length).trim()
+                    script.innerHTML = `${lines.join('\n')}\nwindow.finishTask_${taskId}(${lastLine})`
+                } else {
+                    script.innerHTML = `${source}\nwindow.finishTask_${taskId}()`
+                }
+                const resTask = new Promise(resolve => {
+                    window[`finishTask_${taskId}`] = (res, fid) => {
+                        script.remove()
+                        resolve([res, fid])
+                    }
+                })
+                window.onerror = (error, ...args) => {
+                    returnMessage(objToString(error) + '\n', 2)
+                }
+                scriptContainer.appendChild(script)
+                const [res, fId] = await resTask
+                returnMessage(showRes ? objToString(await res) : '', fId)
+            } catch (e) {
+                returnMessage(objToString(e) + '\n', 2)
+            }
+        })
+
+    })()
+
+</script>
+
+<body>
+    <div id="container"></div>
+</body>
+
+</html>

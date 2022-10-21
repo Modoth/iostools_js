@@ -1,0 +1,3346 @@
+<html>
+  <meta charset="utf-8" />
+
+  <script>
+    class ConfigManager {
+      constructor(defaultKeyName = "__id") {
+        this.baseKey = "__base";
+        this.extendKey = "__extend";
+        this.mergeKeyPrefix = "+";
+        this.defaultKeyName = defaultKeyName;
+      }
+
+      getChildNames(obj) {
+        if (!obj) {
+          return undefined;
+        }
+        return Object.keys(obj).filter((k) => k !== this.baseKey);
+      }
+
+      getChildren(obj, keyName) {
+        const names = this.getChildNames(obj);
+        return names && names.map((name) => this.getChild(obj, name, keyName));
+      }
+
+      updateChildren(parent, keyName, ...names) {
+        names.forEach((name) => this.updateChild(parent, name, keyName));
+      }
+
+      updateChild(parent, name, keyName) {
+        if (!parent[name]) {
+          return;
+        }
+        keyName = keyName || this.defaultKeyName;
+        parent[name] = this.getUpdate(parent[name], keyName);
+      }
+
+      getUpdate(obj, keyName) {
+        return Object.fromEntries(
+          this.getChildren(obj, keyName).map((i) => [i[keyName], i])
+        );
+      }
+
+      mergeObj(base, additional) {
+        if (additional === null) {
+          return null;
+        }
+        const m = {};
+
+        const keys = new Map();
+        const objs = [base, additional];
+        for (let i = 0; i < objs.length; i++) {
+          const obj = objs[i];
+          if (!obj) {
+            continue;
+          }
+          for (let kOriginal in obj) {
+            let key = kOriginal;
+            let merge = false;
+            if (kOriginal.startsWith(this.mergeKeyPrefix)) {
+              key = kOriginal.slice(this.mergeKeyPrefix.length);
+              merge = true;
+            }
+            const value = keys.get(key) || { keys: [] };
+            keys.set(key, value);
+            value.merge = merge;
+            value.keys[i] = kOriginal;
+          }
+        }
+        for (let [
+          key,
+          {
+            keys: [kBase, kAdditional],
+            merge,
+          },
+        ] of keys) {
+          kBase = kBase || key;
+          kAdditional = kAdditional || key;
+          if (merge) {
+            m[key] = this.mergeObj(base?.[kBase], additional?.[kAdditional]);
+          } else {
+            m[key] =
+              additional?.[kAdditional] !== undefined
+                ? additional[kAdditional]
+                : base?.[kBase];
+          }
+        }
+        return m;
+      }
+
+      getChild(obj, childName, keyName) {
+        if (!obj || !obj[childName]) {
+          return;
+        }
+        keyName = keyName || this.defaultKeyName;
+        const base = obj[childName][this.extendKey]
+          ? this.getChild(obj, obj[childName][this.extendKey], keyName)
+          : obj[this.baseKey];
+        const child = obj[childName];
+        child[keyName] = childName;
+        if (!base) {
+          return child;
+        }
+        return this.mergeObj(base, child);
+      }
+    }
+
+    const Api = {
+      appService: window.os.app,
+      localStorage: window.os.localStorage,
+    };
+    const ClockStatus = {
+      Stop: 0,
+      Runing: 1,
+      Pause: 2,
+    };
+
+    class Clock {
+      constructor(tps = 1, timeScale = 1) {
+        this.now_ = -1;
+        this.interval_ = 0;
+        this.timeScale = 1;
+        this.tps_ = Math.min(1000, tps);
+      }
+
+      get now() {
+        return this.now_;
+      }
+
+      onTick_() {
+        this.tick_++;
+        const now = Date.now();
+        this.now_ = now - this.start_;
+        this.tickTime_ += ((now - this.lastTickTime_) * this.timeScale) / 1000;
+        this.lastTickTime_ = now;
+        let task = this.tasks_[0];
+        while (task && task.raiseTick <= this.tick_) {
+          task.resolve();
+          this.tasks_.shift();
+          task = this.tasks_[0];
+        }
+      }
+
+      start() {
+        this.tick_ = 0;
+        this.now_ = 0;
+        this.tickTime_ = 0;
+        this.start_ = Date.now();
+        this.tasks_ = [];
+        this.resume();
+      }
+
+      pause() {
+        clearInterval(this.interval_);
+        this.status = ClockStatus.Stop;
+      }
+
+      startOrResume() {
+        if (this.tasks_) {
+          this.resume();
+        } else {
+          this.start();
+        }
+      }
+
+      resume() {
+        this.interval_ = setInterval(this.onTick_.bind(this), 1000 / this.tps_);
+        this.lastTickTime_ = Date.now();
+        this.status = ClockStatus.Runing;
+      }
+
+      stop() {
+        this.pause();
+        this.status = ClockStatus.Stop;
+      }
+
+      get tick() {
+        return this.tick_;
+      }
+
+      get tickTime() {
+        return this.tickTime_;
+      }
+
+      get tps() {
+        return this.tps_;
+      }
+
+      wait(tick = 0) {
+        return new Promise((resolve) => {
+          const raiseTick = this.tick_ + tick;
+          const newTask = { raiseTick, resolve };
+          const beforeIdx = this.tasks_.findIndex(
+            (t) => t.raiseTick > raiseTick
+          );
+          if (beforeIdx === -1) {
+            this.tasks_.push(newTask);
+          } else {
+            this.tasks_.splice(beforeIdx - 1, 0, newTask);
+          }
+        });
+      }
+    }
+
+    class Skill {
+      constructor(info) {
+        this.registerProperties(
+          "cooldown",
+          "remainCooldown",
+          "last",
+          "remainLast",
+          "released",
+          "releasedTime",
+          "lastReleasedTime",
+          "releaseEvent",
+          "finishEvent",
+          "cooldownEvent",
+          "disabled",
+          "highlight"
+        );
+        Object.assign(this, info);
+      }
+
+      updateCooldown(time) {
+        if (this.remainCooldown === undefined) {
+          return;
+        }
+        if (this.cooldown) {
+          this.remainCooldown = Math.max(
+            0,
+            this.lastReleasedTime + this.cooldown - time
+          );
+          if (this.remainCooldown) {
+            return;
+          }
+        }
+        this.remainCooldown = undefined;
+        this.cooldownEvent = {};
+      }
+
+      updateLast(time) {
+        if (!this.released) {
+          return;
+        }
+        if (this.releasedTime === undefined) {
+          this.releasedTime = time;
+          this.lastReleasedTime = time;
+          this.remainCooldown = this.cooldown || 0;
+          this.releaseEvent = {};
+        }
+        if (this.last) {
+          this.remainLast = Math.max(0, this.last + this.releasedTime - time);
+          if (this.remainLast) {
+            return;
+          }
+        }
+        this.remainLast = undefined;
+        this.released = undefined;
+        this.releasedTime = undefined;
+        this.finishEvent = {};
+      }
+
+      update(time) {
+        this.updateLast(time);
+        this.updateCooldown(time);
+      }
+
+      release() {
+        if (this.remainCooldown) {
+          return;
+        }
+        this.released = true;
+      }
+    }
+
+    class CellsMapAppBase {
+      constructor() {
+        /** @type { Object.<string,HTMLElement> } */
+        this.components;
+        const updatePauseMenu = () => {
+          this.pauseMenu.name = !this.running || this.finished ? "▶️" : "⏹";
+        };
+        registerProperties(
+          this,
+          "map",
+          "theme",
+          "themeStr",
+          "leftMenus",
+          "rightMenus",
+          "languages",
+          "sessions",
+          "sessionName",
+          "resourceItems",
+          "currentItem",
+          "fps",
+          "menuBottomContent",
+          "menuTopContent",
+          ["finished", updatePauseMenu],
+          ["running", updatePauseMenu],
+          [
+            "menuItems",
+            () => {
+              let halfLength = Math.floor(this.menuItems.length / 2);
+              this.leftMenus = this.menuItems.slice(0, halfLength);
+              this.rightMenus = this.menuItems.slice(halfLength);
+            },
+          ]
+        );
+        this.configManager = new ConfigManager();
+        this.STATE_KEY = "state";
+        this.WIN = "win";
+        this.DEFEAT = "defeat";
+        this.defaultState = {};
+        this.Api = Api;
+        this.resourceItems = [];
+        this.currentItem = undefined; //name, avatar, cell, skillGroups
+        this.cellProps = [
+          ["group", "groups"],
+          ["type", "types"],
+          ["data", "datas"],
+        ];
+        this.layers = [];
+        this.mapTheme = "";
+        this.pauseMenu = {
+          onclick: () => this.toggleRunning(),
+        };
+        registerProperties(this.pauseMenu, "name");
+        updatePauseMenu();
+        this.menuItems = [
+          this.pauseMenu,
+          {
+            name: "⏺",
+            onclick: () => this.shutdown(),
+          },
+        ];
+      }
+
+      async shutdown() {
+        if (this.running) {
+          this.toggleRunning();
+        }
+        await this.Api.appService.close();
+      }
+
+      async loadState() {
+        try {
+          return (
+            JSON.parse(await Api.localStorage.getItem(this.STATE_KEY)) ||
+            this.defaultState
+          );
+        } catch {
+          return {};
+        }
+      }
+
+      async saveState(state) {
+        try {
+          await Api.localStorage.setItem(this.STATE_KEY, JSON.stringify(state));
+        } catch {}
+      }
+
+      initData(data) {
+        const base = data?.sessions[this.configManager.baseKey];
+        if (base) {
+          this.configManager.updateChildren(
+            base,
+            undefined,
+            "themes",
+            "languages"
+          );
+        }
+        base.theme = base.themes[base.theme];
+        this.configManager.updateChild(data, "sessions");
+        return data;
+      }
+
+      async loadSession(sessionName) {
+        this.sessionName = sessionName;
+        this.themeStr = undefined;
+        this.finished = undefined;
+        await this.saveState({ ...this.state, sessionName });
+        const sessionInfo = this.data.sessions[sessionName];
+        this.sessionInfo = sessionInfo;
+        await this.beforeLoadMap?.();
+        if (this.fps > 0) {
+          this.clock = new Clock(this.fps);
+        }
+        this.languages = new Proxy(Object.values(sessionInfo.languages)[0], {
+          get: (target, p, _) => {
+            return target[p] === undefined ? p : target[p];
+          },
+        });
+        this.theme = sessionInfo.theme;
+        let themeStr = `
+:host{
+${Object.entries(this.theme)
+  .filter(([_, value]) => value)
+  .map(([key, value]) => `\t--${key}:${value};\n`)
+  .join("")}
+}`;
+        let maxCellType = -1;
+        const [_, props] = this.cellProps[0];
+        const width = sessionInfo[props][0]?.length || 0;
+        const height = sessionInfo[props].length;
+        const cells = [];
+        const cellProps = this.cellProps.map((i) => i[0]);
+        for (let y = 0; y < height; y++) {
+          let col = [];
+          cells.push(col);
+          for (let x = 0; x < width; x++) {
+            let cell = { x, y };
+            col.push(cell);
+            registerProperties(cell, ...cellProps);
+            for (const [prop, props] of this.cellProps) {
+              if (!props) {
+                continue;
+              }
+              cell[prop] = sessionInfo[props]?.[y]?.[x];
+              maxCellType = Math.max(cell[prop], maxCellType);
+            }
+          }
+        }
+        const map = new CellsMap(this.layers, cells);
+        for (let cellType = 0; cellType <= maxCellType; cellType++) {
+          themeStr += `
+              .cell-${cellType}{
+                --bg: var(--${cellType}-bg);
+                --fg: var(--${cellType}-fg);
+              }
+              .cell-${cellType} .cell-bg{
+                background: var(--bg);
+                color: var(--fg);
+              }
+              `;
+        }
+        map.theme = this.mapTheme + themeStr;
+        map.selectCell = this.selectCell?.bind(this);
+        map.selectObject = this.selectObject?.bind(this);
+        this.themeStr = themeStr;
+        this.map = map;
+        await this.afterLoadMap?.(sessionInfo);
+        this.toggleRunning();
+        this.finished = (await this.gameLoop?.()) || this.WIN;
+        console.log(this.finished);
+        if (this.running) {
+          this.toggleRunning(true);
+        }
+        await this.modal_.toast(
+          `${this.languages[this.finished]}`,
+          2000,
+          this.waitingPause()
+        );
+        if (this.finished === this.DEFEAT) {
+          await this.reloadWindow(this.sessionName);
+        } else {
+          await this.loadNextSession();
+        }
+      }
+
+      async loadNextSession() {
+        let idx = this.sessions.findIndex((c) => c === this.sessionName);
+        idx++;
+        let sessionName = this.sessions[idx];
+        if (!sessionName) {
+          await this.modal_.toast(this.languages.allRestart);
+          sessionName = this.sessions[0];
+        }
+        await this.reloadWindow(sessionName);
+      }
+
+      async start() {
+        /** @type { { toast:(msg:string, timeout:number = 1000)=>Promise<any> } } */
+        this.modal_ = this.components.modal.model;
+        this.sessions = Object.keys(this.data.sessions);
+        this.state = await this.loadState();
+        let sessionName = this.state.sessionName;
+        if (!sessionName || !this.data.sessions[sessionName]) {
+          sessionName = this.sessions[0];
+        }
+        await this.loadSession(sessionName);
+      }
+
+      async selectSession() {
+        const sessionName = (
+          await this.modal_.select(
+            this.languages.select,
+            this.sessions.map((value) => ({
+              value,
+              displayName: this.languages[value] || value,
+            })),
+            Math.max(
+              0,
+              this.sessions.findIndex((s) => s === this.sessionName)
+            ),
+            { itemName: "displayName" }
+          )
+        )?.value;
+        if (!sessionName || sessionName === this.sessionName) {
+          return;
+        }
+        await this.reloadWindow(sessionName);
+      }
+
+      async reloadWindow(sessionName) {
+        await this.saveState({ ...this.state, sessionName });
+        window.location.reload();
+      }
+
+      toggleRunning(finishedWaiting = false) {
+        if (!finishedWaiting && this.finished) {
+          window.location.reload();
+          return;
+        }
+        this.running = !this.running;
+        if (!this.running) {
+          const waitingPauseObject = {};
+          waitingPauseObject.task = new Promise(
+            (resolve) => (waitingPauseObject.resolve = resolve)
+          );
+          this.waitingPauseObject = waitingPauseObject;
+          this.clock?.pause();
+        } else {
+          this.clock?.startOrResume();
+          if (this.waitingPauseObject) {
+            const { resolve } = this.waitingPauseObject;
+            this.waitingPauseObject = undefined;
+
+            resolve();
+          }
+        }
+      }
+
+      async waitingPause() {
+        return this.waitingPauseObject?.task;
+      }
+    }
+
+    const styleObjToString = (name, style) => {
+      if (typeof style === "string") {
+        return style;
+      }
+      const cssObjs = [["." + name, style]];
+      const cssObjToString = (name, css) => {
+        let cssStr = `${name}{\n`;
+        for (let p in css) {
+          if (css[p] && typeof css[p] === "object") {
+            cssObjs.push([name + " ." + p, css[p]]);
+            continue;
+          }
+          cssStr += `\t${p}:${css[p]};\n`;
+        }
+        cssStr += "}";
+        return cssStr;
+      };
+      let styleStr = "";
+      while (cssObjs.length) {
+        const [name, css] = cssObjs.shift();
+        styleStr += cssObjToString(name, css) + "\n";
+      }
+      return styleStr;
+    };
+
+    class CellLayer {
+      constructor(
+        filterOrObjects = () => true,
+        cell = { text: (cell) => cell.group },
+        name = "",
+        style = {}
+      ) {
+        let filter, objects;
+        if (Array.isArray(filterOrObjects)) {
+          objects = filterOrObjects;
+        } else {
+          filter = filterOrObjects;
+        }
+        this.cellStyleObjToString = (style) => styleObjToString(name, style);
+        style = styleObjToString(name, style);
+        registerProperties(this, "objects");
+        Object.assign(this, { filter, objects, cell, name, style });
+      }
+    }
+
+    class CellsMap {
+      constructor(layers = [new CellLayer()], cells = []) {
+        registerProperties(this, "cells", "layers", "theme");
+        Object.assign(this, { cells, layers });
+      }
+    }
+
+    const PLANT_LAND = "1";
+    const BUILDING_LAND = "2";
+
+    class App extends CellsMapAppBase {
+      constructor() {
+        super();
+        /** @type { Object.<string,HTMLElement> } */
+        this.components;
+        this.defaultState = Object.assign({}, this.defaultState || {}, {});
+        this.cellProps = [
+          ["farm", "farms"],
+          ["terrain", "terrains"],
+          ["selected"],
+        ];
+        this.plantsLayer = new CellLayer(
+          [],
+          {
+            text: (obj) => obj.avatar,
+            classNames: (obj) => (obj.growing ? "growing" : ""),
+          },
+          "plant-layer"
+        );
+        this.buildingsLayer = new CellLayer(
+          [],
+          {
+            text: (obj) => obj.avatar,
+            style: (obj) => ({ "--range": obj.range || 0 }),
+            classNames: (obj) => (obj.cell?.selected ? "selected" : ""),
+          },
+          "building-layer"
+        );
+        const classNames = (c) =>
+          `cell-${c.terrain} ` + (c.selected ? "selected" : "");
+        this.layers = [
+          new CellLayer(
+            (c) => c.farm === PLANT_LAND,
+            { classNames },
+            "plant-land-layer"
+          ),
+          new CellLayer(
+            (c) => c.farm === BUILDING_LAND,
+            { classNames },
+            "building-land-layer"
+          ),
+          this.plantsLayer,
+          this.buildingsLayer,
+        ];
+        const moneyItem = { prop: "money", value: "" }.registerAllProperties();
+        const runningTimeItem = {
+          prop: "runningTime",
+          value: "",
+        }.registerAllProperties();
+        this.registerProperties(
+          [
+            "money",
+            () =>
+              (moneyItem.value = this.money.toLocaleString("zh-CH", {
+                style: "currency",
+                currency: "CNY",
+              })),
+          ],
+          [
+            "runningTime",
+            () =>
+              (runningTimeItem.value = new Date(
+                (16 * 60 * 60 + this.runningTime) * 1000
+              ).toLocaleTimeString()),
+          ]
+        );
+        this.resourceItems = [runningTimeItem, moneyItem];
+        this.mapTheme =
+          '.building-land-layer {\n    filter: drop-shadow(3px 3px 3px black) drop-shadow(-1px -1px 1px #0004);\n}\n\n.building-land-layer.cell {}\n\n.plant-land-layer {}\n\n.plant-land-layer .cell {}\n\n\n.unit-layer {}\n\n.unit-layer .cell {}\n\n.building-layer .cell.selected {}\n\n.building-layer .cell.selected::before {\n    content: "";\n    position: absolute;\n    width: calc(var(--range)*200% - 100%);\n    height: calc(var(--range)*200% - 100%);\n    border-radius: 20px;\n    background: var(--bg);\n    z-index: 0;\n    opacity: 0.2;\n    pointer-events: none;\n}\n\n.plant-layer .cell {\n    animation: blinker 1s ease-in-out infinite;\n}\n\n@keyframes growing {\n    50% {\n        transform: scale(0.5);\n    }\n}\n\n@keyframes blinker {\n    50% {\n        opacity: 0.5;\n    }\n}\n\n.plant-layer .cell.growing {\n    animation: growing 5s ease-in-out infinite;\n}';
+      }
+
+      selectObject(obj) {
+        this.selectCell(obj.cell);
+      }
+
+      selectCell(cell) {
+        this.selectItem("selectedCell", cell);
+        if (this.selectItem("selectedObject", this.selectedCell?.object)) {
+        }
+        this.updateCurrentItem(this.selectedObject);
+      }
+
+      selectItem(prop, value) {
+        if (this[prop] === value) {
+          return;
+        }
+        if (this[prop]) {
+          this[prop].selected = undefined;
+        }
+        this[prop] = value;
+        if (this[prop]) {
+          this[prop].selected = true;
+        }
+      }
+
+      getUnitLib(UnitType) {
+        switch (UnitType) {
+          case Building:
+            return this.buildingsLib;
+          case Plant:
+            return this.plantsLib;
+          default:
+            return;
+        }
+      }
+
+      getUnitLayer(UnitType) {
+        switch (UnitType) {
+          case Building:
+            return this.buildingsLayer;
+          case Plant:
+            return this.plantsLayer;
+          default:
+            return;
+        }
+      }
+
+      getTypeAndInstance(typeOrInstance) {
+        if (typeOrInstance.constructor === Function) {
+          return [typeOrInstance, undefined];
+        }
+        return [typeOrInstance.constructor, typeOrInstance];
+      }
+
+      createUpgradeSkills(cell, fromUnitOrType, toName, init = {}) {
+        let [UnitType, from] = this.getTypeAndInstance(fromUnitOrType);
+        let lib = this.getUnitLib(UnitType);
+        let method = "upgrade";
+        if (!from) {
+          const emptyKey = "__empty";
+          from = lib[emptyKey];
+          method = lib === this.plantsLib ? "plant" : "build";
+        }
+        if (toName) {
+          return [
+            this.createUpgradeSkill(
+              cell,
+              UnitType,
+              from,
+              Object.assign({}, lib[toName], init),
+              method
+            ),
+          ];
+        }
+        if (!from.upgrades?.length) {
+          return;
+        }
+        return from.upgrades.map((toName) =>
+          this.createUpgradeSkill(
+            cell,
+            UnitType,
+            from,
+            Object.assign({}, lib[toName], init),
+            method
+          )
+        );
+      }
+
+      createUpgradeSkill(cell, UnitType, from, to, method, init) {
+        const skill = {};
+        skill.name = method;
+        const resources = Object.entries(
+          to.resources || {}
+        ).map(([name, value]) => ({
+          name,
+          value:
+            value -
+            this.sessionInfo.depreciationRate * (from.resources?.[name] || 0),
+        }));
+        skill.options = [
+          {
+            name: to.avatar,
+            value: to,
+            resources,
+          },
+        ];
+        skill.release = (opt) => {
+          const notEnoughResources = [];
+          for (let { name, value } of resources) {
+            if (this[name] < value) {
+              notEnoughResources.push(name);
+            }
+          }
+          if (notEnoughResources.length) {
+            this.modal_.toast(
+              `${this.languages.resourcesNotEnough}:\t${notEnoughResources
+                .map((n) => this.languages[n])
+                .join("、")}`
+            );
+            return;
+          }
+          for (let { name, value } of resources) {
+            this[name] -= value;
+          }
+          return this.createOrUpgradeUnit(cell, UnitType, from, to);
+        };
+        return skill;
+      }
+
+      createAutoReplantSkill(unit) {
+        const skill = { danger: !!unit.autoReplant }.registerAllProperties();
+        skill.name = "autoReplant";
+        skill.release = () => {
+          unit.autoReplant = !unit.autoReplant;
+          skill.danger = !!unit.autoReplant;
+        };
+        return skill;
+      }
+
+      createDestorySkill(unit) {
+        const skill = {};
+        skill.name = "destory";
+        skill.danger = true;
+        const resources = Object.entries(
+          unit.resources || {}
+        ).map(([name, value]) => ({
+          name,
+          value: value * this.sessionInfo.depreciationRate,
+        }));
+        skill.options = [
+          {
+            name: "🧨",
+            resources,
+          },
+        ];
+        skill.release = () => {
+          for (let { name, value } of resources) {
+            this[name] += value;
+          }
+          this.destoryUnit(unit);
+        };
+        return skill;
+      }
+
+      destoryUnit(unit) {
+        const UnitType = unit.constructor;
+        if (UnitType === Building) {
+          this.updateCellProduces(unit, undefined);
+        }
+        const layer = this.getUnitLayer(UnitType);
+        layer.objects = layer.objects.filter((o) => o !== unit);
+        unit.cell.object = undefined;
+        unit.cell = undefined;
+        unit.dispose();
+        if (this.selectedCell) {
+          this.selectCell(this.selectedCell);
+        }
+      }
+
+      createOrUpgradeUnit(cell, UnitType, from, to) {
+        if (!(from instanceof UnitType)) {
+          from = undefined;
+        }
+        const layer = this.getUnitLayer(UnitType);
+        const newUnit = new UnitType(to);
+        newUnit.cell = cell;
+        newUnit.cell.object = newUnit;
+        layer.objects = [
+          ...(from ? layer.objects.filter((o) => o !== from) : layer.objects),
+          newUnit,
+        ];
+        if (UnitType === Building) {
+          this.updateCellProduces(from, newUnit);
+        } else if (UnitType === Plant) {
+          const onMatured = () => {
+            for (let [resource, value] of Object.entries(
+              newUnit.prices || []
+            )) {
+              this[resource] = (this[resource] || 0) + (value || 0);
+            }
+            this.destoryUnit(newUnit);
+            if (newUnit.autoReplant) {
+              const skill = this.createUpgradeSkills(
+                cell,
+                UnitType,
+                newUnit.name,
+                { autoReplant: true }
+              )[0];
+              const u = skill.release();
+              if (u) {
+                if (cell === this.selectedCell) {
+                  this.selectCell(cell);
+                }
+              }
+            }
+          };
+          newUnit.on("matured", onMatured);
+        }
+        if (newUnit.cell === this.selectedCell) {
+          this.selectCell(this.selectedCell);
+        }
+        if (from) {
+          from.cell = undefined;
+          from.dispose();
+        }
+        return newUnit;
+      }
+
+      updateCellProduces(from, to) {
+        this.increateOrDecreaseBuildingProduces(from);
+        this.increateOrDecreaseBuildingProduces(to, true);
+      }
+
+      increateOrDecreaseBuildingProduces(building, add) {
+        if (!building?.range) {
+          return;
+        }
+        const r = building.range - 0.5;
+        const { x, y } = building.cell;
+        const xMin = Math.floor(x - r + 1);
+        const yMin = Math.floor(y - r + 1);
+        const xMax = Math.ceil(x + r - 1);
+        const yMax = Math.ceil(y + r - 1);
+        for (let y = yMin; y <= yMax; y++) {
+          for (let x = xMin; x <= xMax; x++) {
+            const cell = this.map.cells[y]?.[x];
+            if (cell?.farm !== PLANT_LAND) {
+              continue;
+            }
+            cell.producesFrom = cell.producesFrom?.length
+              ? cell.producesFrom.filter((f) => f !== building)
+              : [];
+            if (add) {
+              cell.producesFrom.push(building);
+            }
+            cell.produces = cell.producesFrom.reduce((p, c) => {
+              const cp = c.produces;
+              for (let r in cp) {
+                p[r] = (p[r] || 0) + (cp[r] || 0);
+              }
+              return p;
+            }, Object.assign({}, cell.landProduces));
+          }
+        }
+      }
+
+      currentUnitFromEmpty() {
+        if (!this.selectedCell) {
+          return;
+        }
+        const upgradeSkills = this.createUpgradeSkills(
+          this.selectedCell,
+          this.selectedCell.farm === PLANT_LAND ? Plant : Building
+        );
+        return {
+          skillGroups: [upgradeSkills],
+        };
+      }
+
+      currentItemFromSource(source) {
+        const { name, avatar, cell } = source;
+        const skillGroups = [this.createUpgradeSkills(cell, source)];
+        const additionalSkills = [];
+        if (source?.constructor === Plant) {
+          additionalSkills.push(this.createAutoReplantSkill(source));
+        }
+        if (source?.destorable) {
+          additionalSkills.push(this.createDestorySkill(source));
+        }
+        if (additionalSkills.length) {
+          skillGroups.push(additionalSkills);
+        }
+
+        return {
+          name,
+          avatar,
+          cell,
+          skillGroups,
+        };
+      }
+
+      updateCurrentItem(sourceObj) {
+        if (
+          this.currentItemSourceObj &&
+          this.currentItemSourceObj === sourceObj
+        ) {
+          return;
+        }
+        if (this.currentItemSourceObj?.currentHandlers?.length) {
+          this.currentItemSourceObj.currentHandlers.forEach((handler) =>
+            this.currentItemSourceObj.off(...handler)
+          );
+          this.currentItemSourceObj.currentHandlers = undefined;
+        }
+        this.currentItemSourceObj = sourceObj;
+        const item = sourceObj
+          ? this.currentItemFromSource(sourceObj)
+          : this.currentUnitFromEmpty();
+        if (item) {
+          item.props = [];
+          const landProps = Object.entries(this.selectedCell?.produces || {})
+            .map(([name, value]) => ({ name, value }))
+            .sort((i, j) => i.name > j.name);
+          if (landProps.length) {
+            item.props.push({ groupName: "landProps" }, ...landProps);
+          }
+          if (sourceObj) {
+            sourceObj.currentHandlers = [];
+            const UnitType = sourceObj.constructor;
+            if (UnitType === Building) {
+              const buildingProps = [
+                { name: "range", value: sourceObj.range },
+                ...Object.entries(sourceObj.produces)
+                  .map(([name, value]) => ({ name, value }))
+                  .sort((i, j) => i.name > j.name),
+              ];
+              if (buildingProps.length) {
+                item.props.push(
+                  { groupName: "buildingProps" },
+                  ...buildingProps
+                );
+              }
+            } else {
+              const matureProp = {
+                name: "matureLevel",
+                value: "",
+                total: sourceObj.totalMature,
+              }.registerAllProperties();
+              const handler = [
+                "matureLevel",
+                () => {
+                  matureProp.value = (sourceObj.matureLevel || 0).toFixed(0);
+                },
+              ];
+              handler[1]();
+              sourceObj.on(...handler);
+              sourceObj.currentHandlers.push(handler);
+              const plantProps = [
+                ...Object.entries(sourceObj.prices)
+                  .map(([name, value]) => ({ name, value: value }))
+                  .sort((i, j) => i.name > j.name),
+                matureProp,
+                ...Object.entries(sourceObj.consumes)
+                  .map(([name, { dworest, best }]) => ({
+                    name,
+                    value: best || 0,
+                    dworest: dworest || 0,
+                  }))
+                  .sort((i, j) => i.name > j.name),
+              ];
+              if (plantProps.length) {
+                item.props.push({ groupName: "plantProps" }, ...plantProps);
+              }
+            }
+          }
+        }
+        this.currentItem = item;
+      }
+
+      async beforeLoadMap() {
+        this.fpu = 10;
+        this.ups = this.sessionInfo.ups;
+        this.spu = 1 / this.ups;
+        this.fps = this.ups * this.fpu;
+        this.money = this.sessionInfo.initMoney;
+        this.runningTime = 0;
+        ["plants", "buildings"].forEach((i) =>
+          this.configManager.updateChild(this.sessionInfo, i, "name")
+        );
+        this.plantsLib = this.sessionInfo.plants;
+        this.buildingsLib = this.sessionInfo.buildings;
+      }
+
+      async afterLoadMap() {
+        for (let col of this.map.cells) {
+          for (let cell of col) {
+            if (cell.farm !== PLANT_LAND) {
+              continue;
+            }
+            cell.landProduces = Object.assign(
+              {},
+              this.sessionInfo.landProduces[cell.terrain] || {}
+            );
+            cell.produces = Object.assign({}, cell.landProduces);
+          }
+        }
+      }
+
+      async gameLoop() {
+        while (!this.finished) {
+          this.runningTime = this.clock.tickTime;
+          if (
+            this.lastUpdateTime === undefined ||
+            this.runningTime - this.lastUpdateTime >= this.spu
+          ) {
+            this.lastUpdateTime = this.runningTime;
+            this.update();
+          }
+          await this.clock.wait(1);
+        }
+      }
+
+      update() {
+        const time = Math.floor(this.runningTime);
+        for (let i of this.buildingsLayer.objects) {
+          i.update?.(time);
+        }
+        for (let i of this.plantsLayer.objects) {
+          i.update?.(time);
+        }
+      }
+    }
+
+    class Unit {
+      constructor(info) {
+        this.registerProperties("x", "y", "avatar", "name", [
+          "cell",
+          () => {
+            this.x = this.cell?.x;
+            this.y = this.cell?.y;
+          },
+        ]);
+        Object.assign(this, info);
+      }
+
+      updateDt(time) {
+        if (this.lastUpdateTime === undefined) {
+          this.lastUpdateTime = time;
+          return 1;
+        }
+        const dt = time - this.lastUpdateTime;
+        this.lastUpdateTime = time;
+        return dt;
+      }
+    }
+
+    class Plant extends Unit {
+      constructor(info) {
+        super(info);
+        this.matureLevel = this.matureLevel || 0;
+        this.registerProperties(
+          "matureLevel",
+          "matured",
+          "autoReplant",
+          "danger"
+        );
+        this.matureIncPerTime = this.createMatureFunction();
+      }
+
+      createMatureFunction() {
+        const rfs = [];
+        for (let [resource, { best, dworest }] of Object.entries(
+          this.consumes
+        )) {
+          rfs.push([
+            resource,
+            (value) => {
+              if (value === best) {
+                return 1;
+              }
+              if (!dworest && value !== best) {
+                return 0;
+              }
+              return 1 - Math.abs(best - value) / dworest;
+            },
+          ]);
+        }
+        return (produces) =>
+          rfs.reduce((p, [r, f]) => p * f(produces[r] || 0), 1);
+      }
+
+      matureInc(dt) {
+        return dt * this.matureIncPerTime(this.cell.produces);
+      }
+
+      update(time) {
+        if (this.matureLevel === this.totalMature) {
+          return;
+        }
+        const dt = this.updateDt(time);
+        if (!dt) {
+          return;
+        }
+        const inc = this.matureInc(dt);
+        this.growing = inc !== 0;
+        this.matureLevel = this.matureLevel + inc;
+        if (this.matureLevel >= this.totalMature) {
+          this.matureLevel = this.totalMature;
+          this.matured = true;
+        }
+      }
+    }
+
+    class Building extends Unit {
+      constructor(info) {
+        super(info);
+      }
+    }
+  </script>
+
+  <template id="h-map" view-model>
+    <div>
+      <style if.="theme" inner-html$.="theme"></style>
+      <div for.="layer of layers">
+        <style if.="layer.style" inner-html$.="layer.style"></style>
+        <div if.="!layer.objects" class.="'layer cell-layer '+layer.name">
+          <div for.="col of cells" class="col">
+            <div for.="cell of col" class="cell-wraper">
+              <div
+                if.="!layer.filter || layer.filter(cell.this)"
+                onclick.="selectCell?.(cell)"
+                class.="'cell '+layer.cell.classNames?.(cell.this)||''"
+              >
+                <style
+                  if.="layer.cell.style"
+                  inner-html$.="layer.cellStyleObjToString(layer.cell.style(cell.this))"
+                ></style>
+                <div class="cell-bg"></div>
+                <span
+                  class="text"
+                  if.="layer.cell.text"
+                  inner-text$.="layer.cell.text(cell.this)"
+                ></span>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div
+          if.="layer.objects"
+          class.="'layer object-layer '+layer.name"
+          style---width$.="100/cells[0]?.length+'%'"
+          style---height$.="100/cells.length+'%'"
+        >
+          <div
+            for.="obj of layer.objects"
+            class.="'cell '+layer.cell.classNames?.(obj.this, obj.cell.this)||''"
+            style-left$.="100*obj.x/cells[0].length+'%'"
+            style-top$.="100*obj.y/cells.length+'%'"
+            onclick.="selectObject?.(obj)"
+          >
+            <style
+              if.="layer.cell.style"
+              inner-html$.="layer.cellStyleObjToString(layer.cell.style(obj.this))"
+            ></style>
+            <div class="cell-bg"></div>
+            <span
+              class="text"
+              if.="layer.cell.text"
+              inner-text$.="layer.cell.text(obj.this)"
+            ></span>
+          </div>
+        </div>
+      </div>
+    </div>
+    <style>
+      :host {
+        display: block;
+        position: relative;
+        width: 100%;
+        height: 100%;
+      }
+
+      .layer {
+        width: 100%;
+        height: 100%;
+        box-sizing: border-box;
+        position: absolute;
+        pointer-events: none;
+        overflow: hidden;
+      }
+
+      .cell-layer {
+        display: flex;
+        flex-direction: column;
+      }
+
+      .object-layer {
+      }
+
+      .cell-layer > .col {
+        display: flex;
+        flex-direction: row;
+        flex: 1;
+      }
+
+      .cell-layer > .col > .cell-wraper {
+        flex: 1;
+      }
+
+      .cell-layer .cell {
+        width: 100%;
+        height: 100%;
+        position: relative;
+
+        background: var(--fbg);
+        background-size: var(--fbgSize);
+      }
+
+      .cell-layer .cell .cell-bg {
+        position: absolute;
+        width: 100%;
+        height: 100%;
+        opacity: 0.6;
+      }
+
+      .object-layer .cell {
+        width: var(--width);
+        height: var(--height);
+        position: absolute;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+
+      .cell {
+        pointer-events: all;
+      }
+
+      .cell-layer .cell.selected {
+        position: relative;
+      }
+
+      .cell-layer .cell.selected::before {
+        content: "";
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        z-index: 1;
+        border: solid 2px var(--fg);
+        box-sizing: border-box;
+      }
+
+      .object-layer .cell .text {
+        font-size: 1.5em;
+        text-shadow: 3px 3px 5px;
+        z-index: 1;
+      }
+    </style>
+  </template>
+
+  <template id="app-main" view-model="App">
+    <div>
+      <hv-stack class="app bg-wraper">
+        <style inner-html$.="themeStr"></style>
+        <img class="bg" if.="theme?.bgImg" src.="theme.bgImg" />
+        <h-spacer class="menu-wraper menu-wraper-top">
+          <div
+            if.="languages && resourceItems.length"
+            class="resource-items bg-wraper"
+          >
+            <div class="bg"></div>
+            <div
+              for.="item of resourceItems"
+              class="resource-item"
+              class-highlight.="item.highlight"
+            >
+              <span class="prop" inner-text$.="languages[item.prop]"></span>
+              <span class="value" inner-text$.="item.value"></span>
+            </div>
+          </div>
+          <app-menu-top model.="this"></app-menu-top>
+          <div class="session-info">
+            <div
+              class="button"
+              for.="menu of leftMenus"
+              onclick.="menu.onclick()"
+              inner-text$.="menu.name"
+            ></div>
+            <div class="session-name">
+              <span
+                if.="sessionName"
+                onclick.="selectSession()"
+                inner-text$.="languages[sessionName]||sessionName"
+              ></span>
+            </div>
+            <div
+              class="button"
+              for.="menu of rightMenus"
+              onclick.="menu.onclick()"
+              inner-text$.="menu.name"
+            ></div>
+          </div>
+        </h-spacer>
+        <h-square class="game-panel">
+          <h-map model.="map"></h-map>
+        </h-square>
+        <h-spacer class="menu-wraper menu-wraper-bottom">
+          <h-spacer></h-spacer>
+          <app-menu-bottom model.="this"></app-menu-bottom>
+          <div
+            keyif.
+            if.="currentItem"
+            class="current-item bg-wraper"
+            class-highlight.="currentItem.highlight"
+          >
+            <div class="bg"></div>
+            <div class="prop-items" if.="currentItem.props.length">
+              <div
+                for.="i of currentItem.props"
+                class.="i.groupName?'prop-group':'prop-item'"
+              >
+                <span
+                  if.="i.groupName"
+                  class="prop-group-name"
+                  inner-text$.="languages[i.groupName]"
+                ></span>
+                <span
+                  if.="!i.groupName"
+                  class="prop"
+                  inner-text$.="languages[i.name]"
+                ></span>
+                <span if.="!i.groupName" class="value">
+                  <span inner-text$.="i.value"></span>
+                  <span if.="i.total"
+                    >/<span inner-text$.="i.total"></span
+                  ></span>
+                  <span if.="i.dworest"
+                    >±<span inner-text$.="i.dworest"></span
+                  ></span>
+                </span>
+              </div>
+            </div>
+            <div class="current-item-detail">
+              <div
+                if.="currentItem.name||currentItem.avatar||currentItem.cell"
+                class="current-item-info"
+              >
+                <span
+                  if.="currentItem.avatar"
+                  class="avatar"
+                  inner-text$.="currentItem.avatar"
+                ></span>
+                <span
+                  if.="currentItem.name"
+                  class="name"
+                  inner-text$.="languages[currentItem.name]"
+                ></span>
+                <span
+                  if.="currentItem.cell"
+                  class="cell"
+                  inner-text$.="'('+currentItem.cell.x+','+currentItem.cell.y+')'"
+                ></span>
+              </div>
+              <div if.="currentItem.skillGroups" class="skill-groups">
+                <div
+                  class="skill-group"
+                  for.="skillGroup of currentItem.skillGroups"
+                >
+                  <div
+                    for.="skill of skillGroup"
+                    class-hidden.="skill.disabled"
+                    class-danger.="skill.danger"
+                    class="skill status-indicator-wraper"
+                    onclick.="skill.release()"
+                  >
+                    <div class="status-indicator">
+                      <div
+                        if.="skill.last"
+                        style---total$.="skill.last || 0"
+                        style---current$.="skill.remainLast || 0"
+                        class="top-indicator"
+                      >
+                        <div></div>
+                        <div></div>
+                      </div>
+                      <div
+                        style---total$.="skill.cooldown || 1"
+                        style---current$.="skill.remainCooldown || 0"
+                        class="middle-indicator"
+                      >
+                        <div></div>
+                        <div></div>
+                      </div>
+                      <div
+                        if.="skill.last"
+                        style---total$.="skill.last || 0"
+                        style---current$.="skill.remainLast || 0"
+                        class="top-indicator"
+                      >
+                        <div></div>
+                        <div></div>
+                      </div>
+                    </div>
+                    <span
+                      if.="skill.name"
+                      class="skill-name"
+                      inner-text$.="languages[skill.name]"
+                    ></span>
+                    <div if.="skill.options?.length" class="skill-options">
+                      <div
+                        for.="opt of skill.options"
+                        class="skill-option"
+                        onclick.="event.stopPropagation();skill.release(opt)"
+                      >
+                        <span
+                          class="option-name"
+                          if.="opt.name"
+                          inner-text$.="languages[opt.name]"
+                        ></span>
+                        <span
+                          for.="resource of opt.resources"
+                          if.="resource.value"
+                          class="skill-resource"
+                          ><span
+                            class="resource-name"
+                            inner-text$.="languages[resource.name]"
+                          ></span>
+                          <span class="resource-value">
+                            <span if.="resource.value&lt;0">+</span>
+                            <span
+                              inner-text$.="Math.abs(resource.value).toFixed(0)"
+                            ></span>
+                          </span>
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </h-spacer>
+      </hv-stack>
+      <modal-panel id="modal"></modal-panel>
+    </div>
+    <style>
+      :host {
+        display: block;
+      }
+
+      .app {
+        width: 100%;
+        height: 100%;
+        position: absolute;
+        top: 0;
+        left: 0;
+      }
+
+      h-map {
+        transform: scale(0.9);
+        box-shadow: 3px 3px 5px;
+        overflow: hidden;
+        border-radius: 10px;
+      }
+
+      .menu-wraper {
+        overflow: auto;
+      }
+
+      .menu-wraper-top {
+        display: flex;
+        flex-direction: column;
+      }
+
+      .session-info {
+        display: flex;
+        align-self: center;
+        align-items: center;
+      }
+
+      .session-info .button {
+        margin: 0 5px;
+      }
+
+      .session-info .session-name {
+        margin: 10px;
+        font-size: large;
+      }
+
+      .bg-wraper {
+        position: relative;
+      }
+
+      .bg {
+        position: absolute;
+        width: 100%;
+        height: 100%;
+        left: 0;
+        top: 0;
+        pointer-events: none;
+        z-index: -1;
+      }
+
+      .app > .bg {
+        object-fit: cover;
+        filter: blur(10px);
+        opacity: 0.6;
+      }
+
+      .resource-items {
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        --bg: var(--0-bg);
+        --fg: var(--0-fg);
+        position: relative;
+        padding: 5px 0;
+      }
+
+      .resource-items .bg {
+        background: var(--bg);
+        color: var(--fg);
+        opacity: 0.9;
+        filter: blur(1px);
+      }
+
+      .resource-item {
+        display: flex;
+        padding: 3px 0px;
+        align-items: center;
+      }
+
+      .resource-item .prop {
+        margin: 0 5px;
+        flex: 1;
+        white-space: nowrap;
+        text-align: center;
+        border-radius: 5px;
+        white-space: nowrap;
+        overflow-x: auto;
+        border: 1px solid;
+      }
+
+      .resource-item.highlight .prop {
+        border-style: dashed;
+      }
+
+      .resource-item .value {
+        margin: 0 5px;
+        background: var(--fg);
+        color: var(--bg);
+        border-radius: 5px;
+        padding: 0 1px;
+        flex: 1;
+        align-self: center;
+        text-align: center;
+        white-space: nowrap;
+      }
+
+      .menu-wraper-bottom {
+        flex-direction: column;
+        display: flex;
+      }
+
+      .current-item {
+        padding: 5px 5px 20px 5px;
+        display: flex;
+        flex-direction: column;
+      }
+
+      .current-item-detail {
+        position: relative;
+        display: flex;
+        align-items: flex-start;
+      }
+
+      .current-item .bg {
+        background: var(--bg);
+        opacity: 0.9;
+      }
+
+      .current-item-info {
+        width: 3em;
+        min-height: 3em;
+        background: var(--1-bg);
+        color: var(--1-fg);
+        display: flex;
+        flex-direction: column;
+        margin: 5px;
+        align-items: center;
+        border-radius: 5px;
+        padding: 5px;
+      }
+
+      .highlight .current-item-info {
+        background: var(--4-bg);
+        color: var(--4-fg);
+      }
+
+      .current-item-info .avatar {
+        font-size: 2em;
+      }
+
+      .current-item-info .name {
+        font-size: 0.5em;
+        text-align: center;
+      }
+
+      .current-item-info .cell {
+        font-size: 0.5em;
+      }
+
+      .status-indicator-wraper {
+        position: relative;
+        overflow: hidden;
+      }
+
+      .status-indicator {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        display: flex;
+        z-index: -1;
+        flex-direction: column;
+      }
+
+      .status-indicator > * {
+        flex: 1;
+        width: 100%;
+        display: flex;
+      }
+
+      .status-indicator > .middle-indicator {
+        flex: 8;
+      }
+
+      .status-indicator > * > * {
+        height: 100%;
+        transition: flex 0.1s linear;
+      }
+
+      .top-indicator > *:nth-child(1) {
+        background: var(--bg1);
+        flex: var(--current);
+      }
+
+      .top-indicator > *:nth-child(2) {
+        background: var(--bg2);
+        opacity: 0.3;
+        flex: calc(var(--total) - var(--current));
+      }
+
+      .middle-indicator > *:nth-child(1) {
+        background: var(--bg1);
+        flex: calc(var(--total) - var(--current));
+      }
+
+      .middle-indicator > *:nth-child(2) {
+        background: var(--bg2);
+        opacity: 0.3;
+        flex: var(--current);
+      }
+
+      .top-indicator {
+        --bg1: var(--3-bg);
+        --bg2: #000;
+      }
+
+      .middle-indicator {
+        --bg1: var(--1-bg);
+        --bg2: var(--1-bg);
+      }
+
+      .danger .middle-indicator {
+        --bg1: var(--4-bg);
+        --bg2: var(--4-bg);
+      }
+
+      .danger.unit-skill .value {
+        background: var(--4-fg);
+        color: var(--4-bg);
+      }
+
+      .skill-groups {
+        display: flex;
+        flex: 1;
+      }
+
+      .skill-group {
+        flex: 1;
+        display: flex;
+        flex-wrap: wrap;
+        align-content: flex-start;
+      }
+
+      .skill {
+        display: flex;
+        padding: 2px 5px;
+        margin: 5px;
+        border-radius: 5px;
+        --bg: var(--1-bg);
+        --fg: var(--1-fg);
+        color: var(--fg);
+      }
+
+      .skill-name {
+      }
+
+      .skill-options {
+      }
+
+      .skill-option {
+      }
+
+      .option-name {
+        background: var(--fg);
+        color: var(--bg);
+        padding: 0 2px;
+        border-radius: 5px;
+        margin: 0 2px;
+      }
+
+      .skill-resource {
+        font-size: xx-small;
+      }
+
+      .resource-name {
+      }
+
+      .resource-value {
+        text-decoration: underline;
+      }
+
+      .prop-items {
+        margin: 5px;
+        opacity: 0.8;
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: end;
+      }
+
+      .prop-group {
+        min-width: 100%;
+      }
+
+      .prop-group-name {
+        font-weight: bold;
+        padding: 0;
+        height: 0;
+        display: block;
+      }
+
+      .prop-item {
+        padding: 1px 0px;
+        align-items: center;
+        margin: 0px 5px;
+        font-size: small;
+      }
+
+      .prop-item .prop {
+        white-space: nowrap;
+        text-align: center;
+        white-space: nowrap;
+        overflow-x: auto;
+      }
+
+      .prop-item .value {
+        margin: 0 2px;
+        /* background: var(--fg);
+      color: var(--bg); */
+        font-weight: bold;
+        border-radius: 2px;
+        padding: 0 1px;
+        align-self: center;
+        text-align: center;
+        white-space: nowrap;
+        text-decoration: underline;
+      }
+
+      @media (orientation: portrait) {
+        .resource-items {
+          padding-top: 40px;
+        }
+      }
+
+      @media (orientation: landscape) {
+        .app {
+          flex-direction: row-reverse;
+        }
+      }
+    </style>
+  </template>
+
+  <template id="app-menu-top" view-model>
+    <div class="menu menu-top">
+      <style inner-html$.="themeStr"></style>
+    </div>
+  </template>
+  <template id="app-menu-bottom" view-model>
+    <div class="menu menu-bottom">
+      <style>
+        .menu-bottom {
+          background: var(--bg);
+          opacity: 0.9;
+          /* padding: 5px 10px; */
+        }
+      </style>
+      <style inner-html$.="themeStr"></style>
+    </div>
+  </template>
+  <script>
+    window.appData = window.appData || {
+      sessions: {
+        __base: {
+          themes: {
+            __base: {
+              "0-bg": "gold",
+              "0-fg": "black",
+              "1-bg": "green",
+              "1-fg": "white",
+              "2-bg": "blue",
+              "2-fg": "white",
+              "3-bg": "red",
+              "3-fg": "white",
+              "4-bg": "brown",
+              "4-fg": "white",
+              fg: "black",
+              bg: "white",
+              fbg:
+                "repeating-radial-gradient(circle at 0.5em 0.05em, transparent, transparent 0.2em, #EDE8D5 0.21em, #EDE8D5 0.3em, transparent 0.31em), repeating-radial-gradient(circle at 0.5em 0.95em, transparent, transparent 0.2em, #EDE8D5 0.21em, #EDE8D5 0.3em, transparent 0.31em)",
+              fbgSize: "1em 1em",
+              bgImg:
+                "data:image/png;base64,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",
+            },
+            light: {},
+            dark: {
+              fg: "#f5f5f5",
+              bg: "#333",
+              fbg:
+                "radial-gradient(rgba(255, 255, 255, 0.05) 20%, transparent) 0 0/20px 20px, radial-gradient(#FFCA08 6%, transparent 8%) 0 0/20px 20px, radial-gradient(#FFCA08 6%, transparent 8%) 10px 10px/20px 20px, linear-gradient(45deg, transparent 48%, #000000 49% 51%, transparent 52%) 0 0/20px 20px, linear-gradient(-45deg, transparent 48%, #000000 49% 51%, transparent 52%) 0 0/20px 20px",
+              fbgSize: null,
+              bgImg:
+                "data:image/png;base64,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",
+            },
+          },
+          theme: "light",
+          landProduces: {
+            0: {},
+            1: {},
+            2: {},
+            3: {},
+            4: {},
+          },
+          buildings: {
+            __base: {
+              resources: {
+                money: 10000,
+              },
+              produces: {},
+              destorable: true,
+              range: 3,
+            },
+            __empty: {
+              resources: {},
+              upgrades: [
+                "sunshineMachine",
+                "fertilizationMachine",
+                "purlingMachine",
+              ],
+            },
+            sunshineMachine: {
+              avatar: "☀️",
+              range: 5,
+              resources: {
+                money: 0,
+              },
+              produces: {
+                sunshine: 1,
+              },
+            },
+            fertilizationMachine: {
+              avatar: "⛄️",
+              produces: {
+                water: 1,
+                fertilizer: 1,
+              },
+            },
+            purlingMachine: {
+              avatar: "🌧",
+              produces: {
+                water: 1,
+              },
+              upgrades: ["purlingMachine2"],
+            },
+            purlingMachine2: {
+              avatar: "🌧",
+              range: 5,
+              produces: {
+                water: 1,
+              },
+            },
+          },
+          plants: {
+            __base: {
+              destorable: true,
+              autoReplant: true,
+              resources: {
+                money: 100,
+              },
+              prices: {
+                money: 200,
+              },
+              consumes: {
+                water: {
+                  best: 3,
+                  dworest: 3,
+                },
+                fertilizer: {
+                  best: 1,
+                },
+                sunshine: {
+                  best: 1,
+                },
+              },
+              totalMature: 100,
+            },
+            __empty: {
+              resources: {},
+              upgrades: ["rice", "corn"],
+            },
+            rice: {
+              avatar: "🌾",
+            },
+            corn: {
+              avatar: "🌽",
+            },
+          },
+          languages: {
+            "zh-CN": {
+              select: "选择",
+              fertilizationMachine: "施肥器",
+              purlingMachine: "浇水器",
+              purlingMachine2: "灌溉器",
+              sunshineMachine: "人造太阳",
+              sunshine: "阳光",
+              win: "胜利",
+              defeat: "失败",
+              money: "金币",
+              water: "水",
+              fertilizer: "肥料",
+              rice: "水稻",
+              corn: "玉米",
+              plant: "种植",
+              build: "建造",
+              destory: "销毁",
+              landProps: "土地",
+              range: "范围",
+              buildingProps: "设备",
+              plantProps: "植被",
+              autoReplant: "自动重种",
+              runningTime: "游戏时间",
+              resourcesNotEnough: "资源不足",
+              upgrade: "升级",
+              matureLevel: "成熟度",
+              allRestart: "全部完成，重新开始",
+            },
+          },
+          initMoney: 100000,
+          depreciationRate: 0.5,
+          ups: 1,
+        },
+        AY: {
+          farms: [
+            "22222222222",
+            "21011211112",
+            "21101211112",
+            "21111211112",
+            "22222211112",
+            "21110111112",
+            "21111222222",
+            "21101211111",
+            "21111211111",
+            "21111211111",
+            "22222211111",
+          ],
+          terrains: [
+            "44444444444",
+            "40000400004",
+            "40000400004",
+            "40000400004",
+            "44444400004",
+            "40000000004",
+            "40000444444",
+            "40000400000",
+            "40000400000",
+            "40000400000",
+            "44444400000",
+          ],
+        },
+        Tian: {
+          farms: [
+            "22222222222",
+            "21111211112",
+            "21111211112",
+            "21111211112",
+            "21111211112",
+            "22222222222",
+            "21111211112",
+            "21111211112",
+            "21111211112",
+            "21111211112",
+            "22222222222",
+          ],
+          terrains: [
+            "44444444444",
+            "40000400004",
+            "40000400004",
+            "40000400004",
+            "40000400004",
+            "44444444444",
+            "40000400004",
+            "40000400004",
+            "40000400004",
+            "40000400004",
+            "44444444444",
+          ],
+        },
+        Qian: {
+          farms: [
+            "22222222222",
+            "21111211112",
+            "21111211112",
+            "21022222112",
+            "21120112112",
+            "22221102222",
+            "21121112112",
+            "21122222112",
+            "21111211112",
+            "21111211112",
+            "22222222222",
+          ],
+          terrains: [
+            "44444444444",
+            "40000400004",
+            "40000400004",
+            "40044444004",
+            "40040004004",
+            "44440004444",
+            "40040004004",
+            "40044444004",
+            "40000400004",
+            "40000400004",
+            "44444444444",
+          ],
+        },
+      },
+    };
+  </script>
+
+  <meta
+    name="viewport"
+    content="width=device-width, maximum-scale=1.0,user-scalable=no, initial-scale=1"
+  />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="transparent" />
+  <script>
+    const {
+      registerElement,
+      registerProperties,
+      evalInContext,
+      delayDispatcher,
+    } = (() => {
+      const evalInContext = (exp, context) => {
+        return function () {
+          with (this) {
+            try {
+              return eval(`(${exp})`);
+            } catch (e) {
+              console.log(exp);
+              console.log(e);
+              return;
+            }
+          }
+        }.call(context);
+      };
+
+      const removeItem = (item) => {
+        const clearItem = (/**@type {HTMLElement}*/ item) => {
+          for (let c of item.childNodes) {
+            clearItem(c);
+          }
+          let onRemoves = item.onRemoves;
+          item.onRemoves = undefined;
+          if (onRemoves?.length) {
+            onRemoves.forEach((onRemove) => onRemove());
+          }
+        };
+        clearItem(item);
+        item.remove();
+      };
+
+      const onprop = (parent, /**@type {String} */ exp, context, listener) => {
+        const tokens = exp.split(/\.|\?\.|\[|\]/);
+        if (!tokens[1]) {
+          if (context.tmpCtxName === tokens[0]) {
+          } else {
+            context.on && context.on(tokens[0], listener, true, parent);
+            parent.onRemoves = [
+              ...(parent.onRemoves || []),
+              () => {
+                context.off(tokens[0], listener, true);
+              },
+            ];
+          }
+          return;
+        }
+        if (context.tmpCtxName === tokens[0]) {
+          context = context[context.tmpCtxName];
+          tokens.shift();
+        }
+        const clearBind = (current) => {
+          while (current) {
+            if (current.off) {
+              current.off();
+            }
+            const next = current.next;
+            current.next = undefined;
+            current = next;
+          }
+        };
+        const register = (tokens, handler, context, offChain) => {
+          const prop = tokens[0];
+          if (!prop || !context) {
+            return;
+          }
+          offChain.next = {};
+          const registerNext = () => {
+            register(tokens.slice(1), handler, context[prop], offChain.next);
+          };
+          if (context.on && context.on instanceof Function) {
+            const listener = (...args) => {
+              clearBind(offChain.next);
+              offChain.next = {};
+              registerNext();
+              handler(...args);
+            };
+            context.on(prop, listener, true, parent);
+            offChain.off = () => {
+              context.off(prop, listener, true);
+            };
+          }
+          registerNext();
+        };
+        const offChain = {};
+        register(tokens, listener, context, offChain);
+        parent.onRemoves = [
+          ...(parent.onRemoves || []),
+          () => {
+            clearBind(offChain);
+          },
+        ];
+      };
+
+      const bindingForInstruction = (/**@type HTMLElement */ element) => {
+        let forExp = element.getAttribute("for.");
+        const match = forExp.match(
+          /^\s*(((let|const|of)\s+)?(\w+)\s+(of|in)\s+)?\s*(.+)\s*$/
+        );
+        if (!match || !match[6]) {
+          throw new Error("Invalid for Expression");
+        }
+        const collectionName = match[6];
+        const of_in = match[5] || "of";
+        let varName = match[4];
+        let forHead;
+        if (varName) {
+          forHead = `for(const ${varName} ${of_in} ${collectionName})`;
+        } else {
+          varName = "$$i";
+          forHead = `for(const ${varName} of ${collectionName})`;
+        }
+        const comment = document.createComment(element.outerHTML);
+        const parent = element.parentElement;
+        parent.insertBefore(comment, element);
+        element.remove();
+        /**@type Map<any, HTMLElement> */
+        let items = new Map();
+        /**@type Map<any, HTMLElement> */
+        let newItems = new Map();
+        let idx = 0;
+        let allRemoved = false;
+        const update = () => {
+          (function ($$forEach) {
+            newItems = new Map();
+            idx = 0;
+            allRemoved = false;
+            with (this) {
+              eval(`
+          let collection
+          try{
+            collection = this.${collectionName}
+          }
+          catch{
+            //ignore
+          }
+          if (collection) {
+            ${forHead}{
+              $$forEach(${varName})
+              }
+          }`);
+            }
+            for (const [_, { item }] of items) {
+              removeItem(item);
+            }
+            items = newItems;
+          }.call(element.context, ($$i) => {
+            /**@type HTMLElement */
+            let item;
+            if (items.has($$i)) {
+              const pair = items.get($$i);
+              item = pair.item;
+              if (!allRemoved && idx !== pair.idx) {
+                console.log("removed");
+                for (const [_, { item }] of items) {
+                  removeItem(item);
+                }
+                allRemoved = true;
+              }
+              items.delete($$i);
+            } else {
+              item = element.cloneNode(true);
+              item.removeAttribute("id");
+              item.removeAttribute("for.");
+              if (item.updateModel) {
+                item.model = $$i;
+              } else {
+                item.modelBeforeInit = $$i;
+              }
+              const context = Object.create(element.context);
+              context[varName] = $$i;
+              context.tmpCtxName = varName;
+              item.context = context;
+            }
+            parent.insertBefore(item, comment);
+            newItems.set($$i, { idx, item });
+            binding(item);
+            idx++;
+          }));
+        };
+        update();
+        let lastContext = element.context;
+        comment.updateWhenModelChange = () => {
+          if (lastContext === element.context) {
+            return;
+          }
+          lastContext = element.context;
+          update();
+        };
+        onprop(parent, collectionName, element.context, update);
+        return {};
+      };
+
+      const bindingIfInstruction = (
+        /**@type HTMLElement */ element,
+        keyChangeRemove
+      ) => {
+        let ifExp = element.getAttribute("if.");
+        const comment = document.createComment(element.outerHTML);
+        const parent = element.parentElement;
+        parent.insertBefore(comment, element);
+        element.remove();
+        let item;
+        let lastValue;
+        const update = () => {
+          const value = evalInContext(ifExp, element.context);
+          if (keyChangeRemove && value !== lastValue && item) {
+            removeItem(item);
+            item = undefined;
+          }
+          if (value) {
+            if (item) {
+              return;
+            }
+            item = element.cloneNode(true);
+            item.removeAttribute("if.");
+            item.removeAttribute("keyif.");
+            parent.insertBefore(item, comment);
+            item.context = element.context;
+            binding(item);
+          } else if (item) {
+            removeItem(item);
+            item = null;
+          }
+        };
+        update();
+        let lastContext = element.context;
+        comment.updateWhenModelChange = () => {
+          if (lastContext === element.context) {
+            return;
+          }
+          lastContext = element.context;
+          update();
+        };
+        for (const exp of getPropsFromExp(ifExp)) {
+          onprop(parent, exp, element.context, update);
+        }
+        return {};
+      };
+
+      const getPropNameFromBindingAttr = (attr) => {
+        return attr.replace(/-(\w)/g, (_, c) => c.toUpperCase());
+      };
+
+      const getPropsFromExp = (exp) => {
+        return exp.match(/([a-zA-Z0-9_$.\[\]]|\?\.)+/g) || [];
+        // return exp.match(/[a-zA-Z0-9_$.]+/g) || []
+      };
+
+      const bindingAttrs = (/**@type HTMLElement */ element) => {
+        if (element.hasAttribute("for.")) {
+          return bindingForInstruction(element);
+        }
+        if (element.hasAttribute("if.")) {
+          return bindingIfInstruction(element, element.hasAttribute("keyif."));
+        }
+        if (element.updateWhenModelChange) {
+          element.updateWhenModelChange();
+          return element;
+        }
+        const bindingAttrs = element
+          .getAttributeNames()
+          .filter((p) => p.endsWith("."));
+        for (const prop of bindingAttrs) {
+          const $$exp = element.getAttribute(prop);
+          const effectedAttr = prop
+            .slice(0, -".".length)
+            .split(",")
+            .map((a) => a.trim())
+            .filter((a) => a);
+
+          if (effectedAttr.some((a) => a.startsWith("on"))) {
+            const value = `(function($event){with(this){${$$exp}}}).call(event.target.context, event)`;
+            for (const ea of effectedAttr) {
+              if (ea.endsWith("$")) {
+                element.setAttribute(
+                  ea.slice(0, -1),
+                  "event.stopPropagation();" + value
+                );
+              } else {
+                element.setAttribute(ea, value);
+              }
+            }
+            continue;
+          }
+          const update = () => {
+            const value = evalInContext($$exp, element.context);
+            for (const ea of effectedAttr) {
+              if (ea === "model") {
+                if (element.updateModel) {
+                  element.updateModel(value);
+                } else {
+                  element.modelBeforeInit = value;
+                }
+                continue;
+              }
+              if (ea === "focus") {
+                if (value) {
+                  if (element.scrollIntoViewIfNeeded) {
+                    element.scrollIntoViewIfNeeded();
+                  } else {
+                    element.scrollIntoView();
+                  }
+                  element.focus();
+                }
+                continue;
+              }
+              if (ea === "scrollintoview") {
+                if (value) {
+                  if (element.scrollIntoViewIfNeeded) {
+                    element.scrollIntoViewIfNeeded();
+                  } else {
+                    element.scrollIntoView();
+                  }
+                }
+                continue;
+              }
+              if (ea.startsWith("class-")) {
+                const className = ea.slice("class-".length);
+                if (value) {
+                  element.classList.add(className);
+                } else {
+                  element.classList.remove(className);
+                }
+                continue;
+              } else if (ea.startsWith("style-")) {
+                const prop = ea.slice("style-".length, -1);
+                element.style.setProperty(prop, value);
+                continue;
+              }
+              if (ea.endsWith("$")) {
+                let prop = getPropNameFromBindingAttr(ea.slice(0, -1));
+                switch (prop) {
+                  case "innerHtml":
+                    prop = "innerHTML";
+                    break;
+                }
+                element[prop] = value;
+                continue;
+              }
+              if (value === undefined || value === null) {
+                element.removeAttribute(ea);
+              } else if (element[ea] !== value) {
+                element.setAttribute(ea, value);
+              }
+            }
+          };
+          update();
+          for (const exp of getPropsFromExp($$exp)) {
+            onprop(element.parentElement, exp, element.context, update);
+          }
+        }
+        return element;
+      };
+
+      const binding = (/**@type HTMLElement */ element) => {
+        /**@type { Object.<string,HTMLElement> } */
+        const components = element.context.components;
+        if (element.hasAttribute) {
+          const handler = bindingAttrs(element);
+          //collect ids
+          if (element.hasAttribute("id")) {
+            components[element.getAttribute("id")] = handler;
+          }
+          if (handler !== element) {
+            return;
+          }
+        }
+        for (const child of [...element.children]) {
+          if (
+            child.context == element.context ||
+            (child.context &&
+              Object.getPrototypeOf(child.context) === element.context)
+          ) {
+          } else {
+            child.context = element.context;
+          }
+          binding(child);
+        }
+      };
+
+      const getNameFromTagName = (tagName) => {
+        return tagName.replace(/(?:^|-)(\w)/g, (_, c) => c.toUpperCase());
+      };
+
+      class DelayDispatcher {
+        constructor(delay = 50) {
+          this.delay = delay;
+          this.currentTask;
+          this.running = false;
+          this.lastDispatchTime = 0;
+          this.groups = new Map();
+          this.count = 0;
+          // this.delayListeners = new Map()
+        }
+
+        set(obj, key, method) {
+          let group = this.groups.get(obj);
+          if (!group) {
+            group = {};
+            this.groups.set(obj, group);
+          }
+          group[key] = method;
+        }
+
+        async start() {
+          if (this.running) {
+            return;
+          }
+          this.running = true;
+          this.currentTask = new Promise(async (resolve) => {
+            while (this.running) {
+              let now = Date.now();
+              let remain = this.delay - (now - this.lastDispatchTime);
+              if (remain > 0) {
+                await new Promise((r) => setTimeout(r, remain));
+              }
+              let groups = this.groups;
+              await new Promise((resolve) =>
+                window.requestAnimationFrame(async () => {
+                  this.groups = new Map();
+                  for (let [obj, group] of groups) {
+                    if (!obj || !group) {
+                      continue;
+                    }
+                    for (let p in group) {
+                      try {
+                        group[p]?.();
+                      } catch (e) {
+                        console.log(e);
+                      }
+                    }
+                  }
+                  resolve();
+                })
+              );
+            }
+            this.lastDispatchTime = Date.now();
+            this.currentTask = undefined;
+            this.running = false;
+            resolve();
+          });
+          await this.currentTask;
+        }
+
+        async stop() {
+          this.running = false;
+          await this.currentTask;
+        }
+
+        setDelay(delay) {
+          this.delay = delay;
+        }
+      }
+
+      const delayDispatcher = new DelayDispatcher();
+
+      const registerProperties = (obj, ...props) => {
+        const backup = {};
+        if (!obj.define) {
+          addPropChange(obj);
+        }
+        props.forEach((prop) => {
+          const desc = Object.getOwnPropertyDescriptor(obj, prop);
+          if (desc && !desc.configurable) {
+            delete backup[prop];
+            return;
+          }
+          let propValue;
+          let [propName, handler] =
+            prop instanceof Array ? prop : [prop, undefined];
+          if (obj[propName] !== undefined) {
+            backup[propName] = obj[propName];
+          }
+          Object.defineProperty(obj, propName, {
+            get() {
+              return propValue;
+            },
+            set(newValue) {
+              if (propValue === newValue) {
+                return;
+              }
+              const oldValue = propValue;
+              propValue = newValue;
+              obj.raise(propName, newValue, oldValue);
+              handler?.(newValue, oldValue);
+              delayDispatcher.set(obj, propName, () => {
+                obj.raise(propName, newValue, oldValue, true);
+              });
+            },
+          });
+        });
+        Object.assign(obj, backup);
+        return obj;
+      };
+
+      const registerAllProperties = (obj) => {
+        return registerProperties(obj, ...Object.keys(obj));
+      };
+
+      Object.defineProperty(Object.prototype, "registerProperties", {
+        value: function (...props) {
+          return registerProperties(this, ...props);
+        },
+      });
+
+      Object.defineProperty(Object.prototype, "registerAllProperties", {
+        value: function () {
+          return registerAllProperties(this);
+        },
+      });
+
+      delayDispatcher;
+
+      const addPropChange = (/**@type { Object } */ obj) => {
+        /**@type Map<string, Set<{(newValue, oldValue):any}>> */
+        const atonceListeners = new Map();
+        const delayListeners = new Map();
+        const thisProp = "this";
+        Object.defineProperty(obj, thisProp, {
+          get() {
+            return obj;
+          },
+        });
+        Object.defineProperty(obj, "define", {
+          value: (...props) => registerProperties(obj, ...props),
+        });
+        Object.defineProperty(obj, "on", {
+          value: (
+            /**@type string */ prop,
+            listener,
+            delay = false,
+            additional
+          ) => {
+            let l = delay ? delayListeners : atonceListeners;
+            if (!l.has(prop)) {
+              l.set(prop, new Map());
+            }
+            l.get(prop).set(listener, additional);
+            if (delay && delayDispatcher?.delayListeners) {
+              delayDispatcher.delayListeners.set(listener, additional);
+            }
+            delayDispatcher.count++;
+          },
+        });
+
+        Object.defineProperty(obj, "off", {
+          value: (prop, listener, delay = false) => {
+            let l = delay ? delayListeners : atonceListeners;
+            if (!l.has(prop)) {
+              return;
+            }
+            l.get(prop).delete(listener);
+            if (delay && delayDispatcher?.delayListeners) {
+              delayDispatcher.delayListeners.delete(listener);
+            }
+            delayDispatcher.count--;
+          },
+        });
+
+        Object.defineProperty(obj, "clearOn", {
+          value: (delay) => {
+            let l = delay ? delayListeners : atonceListeners;
+            delayDispatcher.count -= l.size;
+            if (delay && delayDispatcher?.delayListeners) {
+              l.forEach((_, listener) => {
+                delayDispatcher.delayListeners.delete(listener);
+              });
+            }
+            l.clear();
+            // for (let p in obj) {
+            //   obj[p].clearOn?.(delay)
+            // }
+          },
+        });
+        Object.defineProperty(obj, "dispose", {
+          value: () => {
+            obj.clearOn(false);
+            obj.clearOn(true);
+          },
+        });
+        Object.defineProperty(obj, "hasOn", {
+          value: (prop, delay = false) => {
+            let l = delay ? delayListeners : atonceListeners;
+            return l.has(prop);
+          },
+        });
+
+        Object.defineProperty(obj, "raise", {
+          value: (prop, newValue, oldValue, delay = false) => {
+            if (prop !== thisProp) {
+              obj.raise(thisProp, obj, obj, delay);
+            }
+            let l = delay ? delayListeners : atonceListeners;
+            if (!l.has(prop)) {
+              return;
+            }
+            for (const [listener, _] of l.get(prop)) {
+              listener(newValue, oldValue);
+            }
+          },
+        });
+      };
+
+      const registerElement = (tagName, /**@type { string } */ constructor) => {
+        const elementClassName = `HTML${
+          constructor || getNameFromTagName(tagName)
+        }Element`;
+        constructor = constructor || "Object";
+        eval(`
+    class ${elementClassName} extends HTMLElement{
+      constructor(){
+        super()
+        const shadow = this.attachShadow({mode:'open'})
+        const template = document.getElementById('${tagName}')
+        if(!template || template.tagName !== 'TEMPLATE' ){
+          throw new Error('Define Template')
+        }
+        this.template_ = template
+        this.shadow_ = shadow
+        this.model_ = new ${constructor}()
+        this.model_.components = { host: this.shadow_ }
+        if(this.context && this.hasAttribute('model.')){
+          const modeExp = this.getAttribute('model.')
+          this.model = evalInContext(modeExp, this.context)
+        }else if(this.modelBeforeInit){
+          this.model = this.modelBeforeInit
+        }else{
+          this.model =  {}
+        }
+      }
+
+      rebuildView(){
+        this.shadow_.innerHTML = ''
+        const instance = document.importNode(this.template_.content, true)
+        this.shadow_.appendChild(instance)
+      }
+  
+      get model(){
+        return this.model_
+      }
+  
+      set model(value){
+        if(value?.on){
+          this.model_ = value || {}
+          this.model_.components = { host: this.shadow_ , ...this.model_.components||{}}
+        }else{
+          //combine code behind with model
+          Object.assign(this.model_, value)
+        }
+        this.shadow_.context = this.model_ 
+        this.rebuildView()
+      }
+  
+      updateModel(value){
+        this.model = value
+        this.connectedCallback()
+      }
+      
+      connectedCallback(){
+        binding(this.shadow_)
+        if(this.model_.launch){
+          this.model_.launch()
+        } 
+      }
+    }
+    customElements.define('${tagName}', ${elementClassName})
+    `);
+      };
+      return {
+        registerElement,
+        registerProperties,
+        evalInContext,
+        delayDispatcher,
+      };
+    })();
+
+    const sleep = (timeout) =>
+      new Promise((resolve) => setTimeout(resolve, timeout));
+
+    class AppBase {
+      async launch() {
+        if (this.launched) {
+          return;
+        }
+        this.launched = true;
+        this.storage = this.initStorage_();
+        this.data = await this.initData(window.appData);
+        window.app = this;
+        await this.start();
+      }
+
+      async registerStorageProperties(...props) {
+        if (!this.storage) {
+          return;
+        }
+        let asyncTimeout = 50;
+        const bgTimeout = 200;
+        for (const [prop, defaultValue, onchange] of props) {
+          let propValue;
+          let valueModified = false;
+          let successLoadFromStorage = false;
+          let loadFunc;
+          let bgLoad = false;
+          const mergeValue = (savedValue) => {
+            if (successLoadFromStorage) {
+              return;
+            }
+            successLoadFromStorage = true;
+            if (!valueModified) {
+              valueModified = true;
+              propValue = savedValue;
+            } else {
+              // merge strategy
+              propValue = savedValue;
+            }
+            if (bgLoad && onchange) {
+              onchange();
+            }
+          };
+          loadFunc = async () => {
+            const jsonStr = await this.storage.getItem(prop);
+            let savedValue;
+            if (!jsonStr) {
+              savedValue = defaultValue;
+            } else {
+              try {
+                savedValue = JSON.parse(jsonStr);
+              } catch {
+                savedValue = defaultValue;
+              }
+            }
+            mergeValue(savedValue);
+          };
+          const tryLoad = async () => {
+            bgLoad = true;
+            const func = loadFunc;
+            loadFunc = null;
+            await Promise.race([
+              func(),
+              sleep(bgTimeout).then(() => {
+                if (!successLoadFromStorage) {
+                  loadFunc = func;
+                }
+              }),
+            ]);
+          };
+          await Promise.race([
+            loadFunc(),
+            sleep(asyncTimeout).then(() => {
+              if (!valueModified) {
+                propValue = defaultValue;
+                valueModified = true;
+                asyncTimeout = 0;
+              }
+            }),
+          ]);
+          Object.defineProperty(this, prop, {
+            get() {
+              if (loadFunc) {
+                tryLoad();
+              }
+              return propValue;
+            },
+            set(newValue) {
+              propValue = newValue;
+              if (successLoadFromStorage) {
+                this.storage.setItem(prop, JSON.stringify(propValue));
+              }
+            },
+          });
+        }
+      }
+
+      initStorage_() {
+        if (window.$localStorage) {
+          return window.$localStorage;
+        }
+        try {
+          const s = window.localStorage;
+          return s;
+        } catch {
+          return {
+            getItem: () => "",
+            setItem: () => true,
+          };
+        }
+      }
+
+      async initData(data) {
+        return data;
+      }
+
+      async start() {
+        console.log("start");
+      }
+
+      async pause() {
+        console.log("pause");
+      }
+
+      async resume() {
+        console.log("pause");
+      }
+
+      async stop() {
+        console.log("stop");
+      }
+    }
+
+    window.onload = async () => {
+      let currentClass = App;
+      while (true) {
+        let baseClass = Object.getPrototypeOf(currentClass);
+        if (
+          !baseClass ||
+          Object.getPrototypeOf(Object) === Object.getPrototypeOf(currentClass)
+        ) {
+          break;
+        }
+        currentClass = baseClass;
+      }
+      Object.setPrototypeOf(currentClass.prototype, AppBase.prototype);
+      for (const template of document.querySelectorAll(
+        "template[id][view-model]"
+      )) {
+        const tagName = template.getAttribute("id");
+        if (!tagName) {
+          continue;
+        }
+        const codeBehind = template.getAttribute("view-model");
+        registerElement(tagName, codeBehind);
+      }
+      delayDispatcher.start();
+    };
+  </script>
+
+  <style>
+    html,
+    body {
+      height: 100%;
+      margin: 0;
+    }
+  </style>
+
+  <body>
+    <app-main></app-main>
+
+    <template id="h-stack" view-model>
+      <slot></slot>
+      <style>
+        :host {
+          display: flex;
+          flex-direction: row;
+        }
+      </style>
+    </template>
+    <template id="v-stack" view-model>
+      <slot></slot>
+      <style>
+        :host {
+          display: flex;
+          flex-direction: column;
+        }
+      </style>
+    </template>
+    <template id="hv-stack" view-model>
+      <slot></slot>
+      <style>
+        :host {
+          display: flex;
+          flex-direction: column;
+        }
+
+        @media (orientation: landscape) {
+          :host {
+            flex-direction: row;
+          }
+        }
+      </style>
+    </template>
+
+    <template id="vh-stack" view-model>
+      <slot></slot>
+      <style>
+        :host {
+          display: flex;
+          flex-direction: row;
+        }
+
+        @media (orientation: landscape) {
+          :host {
+            flex-direction: column;
+          }
+        }
+      </style>
+    </template>
+
+    <template id="h-square" view-model>
+      <slot></slot>
+      <style>
+        :host {
+          width: 100vw;
+          height: 100vw;
+        }
+
+        @media (orientation: landscape) {
+          :host {
+            width: 100vh;
+            height: 100vh;
+          }
+        }
+      </style>
+    </template>
+
+    <template id="h-spacer" view-model>
+      <slot></slot>
+      <style>
+        :host {
+          flex: 1;
+          display: flex;
+        }
+      </style>
+    </template>
+
+    <template id="h-text" view-model>
+      <span inner-text$.="content"></span>
+      <style>
+        :host {
+          flex: 1;
+          display: flex;
+          align-items: center;
+          place-content: center;
+        }
+      </style>
+    </template>
+
+    <template id="play-button" view-model>
+      <span id="btnPlay" class="play-button" class-pause.="isPlaying"></span>
+      <style>
+        :host {
+          display: block;
+          border-radius: 5px;
+          padding: 3px 10px;
+          background-color: #fff4;
+        }
+
+        .play-button {
+          display: block;
+          width: 100%;
+          height: 100%;
+          background-color: var(--color);
+          clip-path: polygon(25% 10%, 25% 90%, 95% 50%, 25% 10%);
+          transition: 200ms all ease-in-out;
+        }
+
+        .play-button.pause {
+          clip-path: polygon(
+            60% 50%,
+            20% 20%,
+            20% 80%,
+            60% 50%,
+            60% 80%,
+            80% 80%,
+            80% 20%,
+            60% 20%
+          );
+        }
+      </style>
+    </template>
+
+    <template id="menu-bar" view-model>
+      <h-stack>
+        <div class-hidden.="!item.show" class="menu-item" for.="item of menus">
+          <span inner-text$.="item.name" onclick.="item.onclick()"></span>
+        </div>
+      </h-stack>
+      <style>
+        :host {
+          display: block;
+        }
+
+        h-stack {
+          overflow: hidden;
+        }
+
+        .menu-item {
+          margin: 5px;
+          background-color: var(--menu-background-color);
+          border-radius: 4px;
+          padding: 2px 5px;
+          color: var(--menu-color);
+          display: flex;
+          justify-content: center;
+          flex: 1;
+        }
+
+        .menu-item > span {
+          display: block;
+          text-overflow: ellipsis;
+          white-space: pre;
+          overflow: hidden;
+          max-width: 6em;
+        }
+
+        .hidden {
+          display: none;
+        }
+      </style>
+    </template>
+
+    <script>
+      class MenuItem {
+        constructor(name = "", onclick = null, show = true) {
+          registerProperties(this, "name", "show");
+          this.name = name;
+          this.show = show;
+          this.onclick = onclick;
+        }
+      }
+    </script>
+
+    <template id="modal-panel" view-model="Modal">
+      <div>
+        <span
+          class="toastMessage"
+          if.="toastMessage"
+          inner-text$.="toastMessage"
+        ></span>
+        <div if.="open" class="modal-wraper" onclick.="close()">
+          <div class="modal" onclick="event.stopPropagation()">
+            <div class="title">
+              <span inner-text$.="title"></span>
+            </div>
+            <div class="body">
+              <div if.="items?.length">
+                <div
+                  class="item"
+                  for.="item of items"
+                  class-highlight.="item === selectedItem"
+                  onclick.="close(item)"
+                >
+                  <span
+                    inner-text$.="options.itemName?item[options.itemName]:item"
+                  ></span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <style>
+        .hidden {
+          /* left: -100%; */
+          /* transition: ease-in-out 0.05s left; */
+          display: none;
+        }
+
+        .toastMessage {
+          color: var(--toast-color, #eee);
+          background-color: var(--toast-background-color, #0008);
+          position: fixed;
+          bottom: 0;
+          margin: 20px auto;
+          left: 50%;
+          transform: translate(-50%, 0);
+          padding: 5px 20px;
+          border-radius: 4px;
+          text-align: center;
+          backdrop-filter: blur(5px);
+        }
+
+        .modal-wraper {
+          position: absolute;
+          top: 0;
+          left: 0;
+          width: 100%;
+          height: 100%;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+        }
+
+        .modal {
+          background: #fff;
+          border-radius: 10px;
+          padding: 10px;
+          width: 90%;
+          max-height: 90%;
+          box-shadow: 3px 3px 5px;
+        }
+
+        .modal .title {
+          font-size: large;
+          margin: 5px 0;
+          font-weight: bold;
+        }
+
+        .modal .body {
+          margin: 5px 0;
+        }
+
+        .modal .foot {
+          margin: 5px 0;
+        }
+
+        .item {
+          margin: 8px 0;
+          background: #0002;
+          padding: 5px;
+          border-radius: 8px;
+        }
+
+        .item.highlight {
+          background: #0008;
+          color: white;
+        }
+      </style>
+    </template>
+    <script>
+      class Modal {
+        constructor() {
+          /**@type { Object.<string,HTMLElement> } */
+          this.components;
+          /**@type { Storage | {  } } */
+          this.storage;
+          registerProperties(
+            this,
+            "toastMessage",
+            "title",
+            "items",
+            "selectedItem",
+            "open",
+            "options"
+          );
+        }
+        toast(/**@string */ msg, /**@type number */ timeout = 1000, task) {
+          return new Promise(async (resolve) => {
+            this.toastMessage = msg;
+            await task;
+            setTimeout(() => {
+              this.toastMessage = null;
+              resolve();
+            }, timeout);
+          });
+        }
+
+        close(result) {
+          if (!this.resolveTask) {
+            return;
+          }
+          if (this.options.requilred && !result) {
+            return;
+          }
+          this.open = undefined;
+          this.resolveTask.resolve(result);
+        }
+
+        select(
+          /** @type string */ msg,
+          /** @type [any] */ values = [],
+          defaultIdx = 0,
+          opt = undefined
+        ) {
+          if (this.resolveTask) {
+            const { resolve, reject } = this.resolveTask;
+            this.resolveTask = undefined;
+            reject();
+          }
+          this.title = msg;
+          this.items = values;
+          this.selectedItem = values[defaultIdx];
+          this.options = opt || {};
+          this.open = true;
+          return new Promise(
+            (resolve, reject) => (this.resolveTask = { resolve, reject })
+          );
+        }
+      }
+    </script>
+    <template id="pop-up" view-model="Popup">
+      <div class="popup">
+        <slot></slot>
+      </div>
+      <style>
+        :host {
+          display: block;
+          position: relative;
+          left: 0;
+          top: 0;
+          bottom: 0;
+          right: 0;
+          position: fixed;
+          background: #0008;
+          backdrop-filter: blur(5px);
+        }
+
+        .popup {
+          max-width: 99%;
+          max-height: 99%;
+          position: absolute;
+          top: 50%;
+          left: 50%;
+          transform: translate(-50%, -50%);
+        }
+      </style>
+    </template>
+    <script>
+      class Popup {}
+    </script>
+  </body>
+</html>

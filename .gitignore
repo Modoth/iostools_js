@@ -1,0 +1,9 @@
+WebTools/sci-calc/pkg
+WebTools/sci-calc/target
+*.code-workspace
+xcuserdata/
+.DS_Store
+build
+build/
+pyodide
+CodeTools/Web/pyodide

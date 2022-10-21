@@ -1,0 +1,3967 @@
+<html>
+  <meta charset="utf-8" />
+
+  <script>
+    class ConfigManager {
+      constructor(defaultKeyName = "__id") {
+        this.baseKey = "__base";
+        this.extendKey = "__extend";
+        this.mergeKeyPrefix = "+";
+        this.defaultKeyName = defaultKeyName;
+      }
+
+      getChildNames(obj) {
+        if (!obj) {
+          return undefined;
+        }
+        return Object.keys(obj).filter((k) => k !== this.baseKey);
+      }
+
+      getChildren(obj, keyName) {
+        const names = this.getChildNames(obj);
+        return names && names.map((name) => this.getChild(obj, name, keyName));
+      }
+
+      updateChildren(parent, keyName, ...names) {
+        names.forEach((name) => this.updateChild(parent, name, keyName));
+      }
+
+      updateChild(parent, name, keyName) {
+        if (!parent[name]) {
+          return;
+        }
+        keyName = keyName || this.defaultKeyName;
+        parent[name] = this.getUpdate(parent[name], keyName);
+      }
+
+      getUpdate(obj, keyName) {
+        return Object.fromEntries(
+          this.getChildren(obj, keyName).map((i) => [i[keyName], i])
+        );
+      }
+
+      mergeObj(base, additional) {
+        if (additional === null) {
+          return null;
+        }
+        const m = {};
+
+        const keys = new Map();
+        const objs = [base, additional];
+        for (let i = 0; i < objs.length; i++) {
+          const obj = objs[i];
+          if (!obj) {
+            continue;
+          }
+          for (let kOriginal in obj) {
+            let key = kOriginal;
+            let merge = false;
+            if (kOriginal.startsWith(this.mergeKeyPrefix)) {
+              key = kOriginal.slice(this.mergeKeyPrefix.length);
+              merge = true;
+            }
+            const value = keys.get(key) || { keys: [] };
+            keys.set(key, value);
+            value.merge = merge;
+            value.keys[i] = kOriginal;
+          }
+        }
+        for (let [
+          key,
+          {
+            keys: [kBase, kAdditional],
+            merge,
+          },
+        ] of keys) {
+          kBase = kBase || key;
+          kAdditional = kAdditional || key;
+          if (merge) {
+            m[key] = this.mergeObj(base?.[kBase], additional?.[kAdditional]);
+          } else {
+            m[key] =
+              additional?.[kAdditional] !== undefined
+                ? additional[kAdditional]
+                : base?.[kBase];
+          }
+        }
+        return m;
+      }
+
+      getChild(obj, childName, keyName) {
+        if (!obj || !obj[childName]) {
+          return;
+        }
+        keyName = keyName || this.defaultKeyName;
+        const base = obj[childName][this.extendKey]
+          ? this.getChild(obj, obj[childName][this.extendKey], keyName)
+          : obj[this.baseKey];
+        const child = obj[childName];
+        child[keyName] = childName;
+        if (!base) {
+          return child;
+        }
+        return this.mergeObj(base, child);
+      }
+    }
+
+    const Api = {
+      appService: window.os.app,
+      localStorage: window.os.localStorage,
+    };
+
+    const cloneObject = (obj) => {
+      if (Array.isArray(obj)) {
+        return obj.map((e) => cloneObject(e));
+      }
+      if (obj && typeof obj === "object") {
+        let res = {};
+        for (let p in obj) {
+          res[p] = cloneObject(obj[p]);
+        }
+        return res;
+      }
+      return obj;
+    };
+
+    class Terrain {
+      constructor() {
+        registerProperties(this, "type", "data");
+      }
+    }
+
+    Terrain.Types = {
+      EMPTY: "empty",
+      GROUND: "ground",
+      ROAD: "road",
+    };
+
+    class Player {
+      constructor() {
+        registerProperties(
+          this,
+          "props",
+          "buildings",
+          "name",
+          "defeat",
+          "avatar",
+          "terrain",
+          "money",
+          "currentBuilding",
+          "currentBuildingPrice",
+          "currentTerrainPrice",
+          "group"
+        );
+        this.buildings = [];
+      }
+
+      addBuilding(building) {
+        building.owner = this;
+        this.buildings = [
+          ...this.buildings.filter((b) => b !== building),
+          building,
+        ];
+      }
+
+      removeBuiding(building) {
+        building.owner = undefined;
+        this.buildings = [...this.buildings.filter((b) => b !== building)];
+      }
+
+      replceBuiding(from, to) {
+        from.owner = undefined;
+        to.owner = this;
+        this.buildings = [...this.buildings.filter((b) => b !== from), to];
+      }
+    }
+
+    class AiController {
+      constructor(player) {
+        /**@type {Player} */
+        this.player = player;
+      }
+      async waitingRoll() {}
+      async waitingFinish(
+        { buildingTypes },
+        /**@type {Calculator}*/ calculator,
+        addOrUpgradeBuilding,
+        buyBuilding
+      ) {
+        const { player } = this;
+        const { terrain } = player;
+        // const buildings = []
+        while (true) {
+          let building = player.currentBuilding;
+          // buildings.push(building)
+          // if (building && !building.owner) {
+          //   debugger
+          // }
+          if (building) {
+            if (building.owner !== player) {
+              if (!building.purchasable) {
+                return;
+              }
+              const cast = calculator.buildingTotalPrice(building);
+              if (cast > player.money) {
+                return;
+              }
+              await buyBuilding(player, building);
+              return;
+            }
+            if (building.needRepair) {
+              const cast = calculator.repaireCast(building);
+              if (player.money >= cast) {
+                player.money -= cast;
+                building.depreciation = 0;
+                building.needRepair = undefined;
+              }
+            }
+            if (!building?.upgrades?.length) {
+              return;
+            }
+            const toName =
+              building.upgrades[
+                Math.floor(Math.random() * (building.upgrades.length + 1))
+              ];
+            if (!toName) {
+              return;
+            }
+            const to = buildingTypes[toName];
+            const cast = calculator.upgradeCast(building, to);
+            if (cast > player.money) {
+              return;
+            }
+            await addOrUpgradeBuilding(to, building);
+          } else {
+            const cast = calculator.landPrice(terrain);
+            if (cast > player.money) {
+              return;
+            }
+            await addOrUpgradeBuilding();
+          }
+        }
+      }
+
+      async waitingFinance(sellBuilding) {
+        while (this.player.money < 0 && this.player.buildings.length) {
+          const b = this.player.buildings[
+            Math.floor(Math.random() * this.player.buildings.length)
+          ];
+          await sellBuilding(b);
+        }
+      }
+    }
+
+    class PlayerController {
+      constructor(player) {
+        /**@type {Player} */
+        this.player = player;
+        const waitingFunctions = [
+          "waitingRoll",
+          "waitingFinish",
+          "waitingFinance",
+        ];
+        registerProperties(this, ...waitingFunctions.map((f) => f + "Task"));
+        waitingFunctions.forEach((f) => {
+          const taskName = f + "Task";
+          const finishTaskF = f + "Finish";
+          this[f] = async () => {
+            if (!this[taskName]) {
+              const task = {};
+              task.promise = new Promise((resolve) => (task.resolve = resolve));
+              this[taskName] = task;
+            }
+            return this[taskName].promise;
+          };
+          this[finishTaskF] = () => {
+            if (!this[taskName]) {
+              return;
+            }
+            const resolve = this[taskName].resolve;
+            this[taskName] = undefined;
+            resolve();
+          };
+        });
+      }
+    }
+
+    class Building {
+      constructor() {
+        registerProperties(
+          this,
+          "avatar",
+          "name",
+          "owner",
+          "terrain",
+          "depreciation",
+          "needRepair",
+          "purchasable"
+        );
+      }
+
+      update(/**@type {Calculator}*/ calculator) {
+        if (calculator.depreciationAndCheck(this)) {
+          this.needRepair = true;
+        } else {
+          this.needRepair = undefined;
+        }
+        const cast = calculator.operationCast(this);
+        this.owner.money -= cast;
+        // this.updateSkills()
+      }
+
+      updateSkills() {
+        for (let sname of ["ownerSkills", "consumerSkills"]) {
+          if (!this[sname]?.length) {
+            continue;
+          }
+          for (let t of this[sname]) {
+            t.update();
+          }
+        }
+      }
+    }
+
+    class Skill {
+      constructor() {
+        registerProperties(this, "group", "name", "cast", "disabled");
+      }
+    }
+
+    class SkillTuple {
+      constructor(skills) {
+        registerProperties(this, "name", "skills", "disabled");
+        this.skills = skills;
+        this.skills.forEach((s) => (s.tuple = this));
+      }
+      async update() {
+        if (!this.skills?.length) {
+          return;
+        }
+        for (let s of this.skills) {
+          s.update?.();
+        }
+      }
+    }
+
+    const createItemsModel = (itemObj) => {
+      const model = [];
+      for (let p in itemObj) {
+        const item = {};
+        registerProperties(item, "value", "disabled");
+        item.prop = p;
+        item.value = itemObj[p];
+        model.push(item);
+        model[p] = item;
+      }
+      return model;
+    };
+
+    class Calculator {
+      constructor(args) {
+        this.CONTEXT = {
+          rand: Math.random,
+          rave: (ave, d) => ave + d * (1 - Math.random() * 2),
+          rave1: (d) => 1 + d * (1 - Math.random() * 2),
+          max: Math.max,
+          max0: (i) => Math.max(0, i),
+          max1: (i) => Math.max(1, i),
+          min: Math.min,
+          min0: (i) => Math.min(0, i),
+          min1: (i) => Math.min(1, i),
+          pow: Math.pow,
+          pow2: (i) => Math.pow(2, i),
+          log2: (i) => Math.log2(Math.max(0, i)),
+          floor: Math.floor,
+          floorn: (v, n) => Math.floor(v * Math.pow(10, n)) / Math.pow(10, n),
+        };
+        this.args = Object.assign({}, this.CONTEXT, cloneObject(args));
+        this.policiesModel = createItemsModel(this.args.policies);
+        this.args.policies = Object.assign(
+          {},
+          this.CONTEXT,
+          this.args.policies
+        );
+      }
+      update(landAmount) {
+        if (
+          this.landAmount !== undefined &&
+          landAmount &&
+          this.landAmount &&
+          landAmount !== this.landAmount
+        ) {
+          this.args.landPrice *= this.landAmount / landAmount;
+        }
+        this.landAmount = landAmount;
+        if (this.args.inflationRate) {
+          for (let p of ["workerPrice", "materielPrice", "landPrice"]) {
+            this.args[p] += this.args[p] * this.args.inflationRate;
+          }
+          for (let p of ["inflation"]) {
+            this.args.policies[p] +=
+              this.args.policies[p] * this.args.inflationRate;
+            this.args.policies[p] = parseFloat(
+              this.args.policies[p].toFixed(8)
+            );
+            this.policiesModel[p].value = this.args.policies[p];
+          }
+        }
+      }
+      assetInjection(roll) {
+        return (this.args.assetInjectionTimes || 0) * roll;
+      }
+      interest(player) {
+        const { interestRate } = this.args.policies;
+        return player.money * interestRate;
+      }
+      updatePolicies(policies) {
+        const n = {};
+        for (const p in policies) {
+          n[p] = evalInContext(policies[p], this.args.policies);
+          n[p] = parseFloat(n[p].toFixed(8));
+        }
+        Object.assign(this.args.policies, n);
+        for (const p in n) {
+          if (this.policiesModel[p]) {
+            this.policiesModel[p].value = n[p];
+          }
+        }
+      }
+      consume(/**@type {Player} */ player, /**@type {Building} */ building) {
+        if (!building) {
+          return;
+        }
+        if (building.owner === player) {
+          return;
+        }
+        if (building.needRepair) {
+          return;
+        }
+        const { workerPrice } = this.args;
+        const { operationWorkerCount, consumeRate } = building;
+        if (!consumeRate) {
+          return;
+        }
+        const discount = building.owner.controller
+          ? 1
+          : this.args.systemConsumeDiscount;
+        return workerPrice * operationWorkerCount * consumeRate * discount;
+      }
+
+      landPrice(/**@type {Terrain} */ terrain) {
+        return this.args.landPrice;
+      }
+
+      depreciationAndCheck(/**@type {Building} */ building) {
+        const { depreciationIncRate } = building;
+        if (depreciationIncRate) {
+          building.depreciation =
+            (building.depreciation || 0) + depreciationIncRate;
+          if (building.depreciation >= this.args.maxDepreciation) {
+            return true;
+          }
+        }
+      }
+
+      operationCast(/**@type {Building} */ building) {
+        const { workerPrice } = this.args;
+        const { operationWorkerCount } = building;
+        return workerPrice * operationWorkerCount;
+      }
+
+      upgradeCast(from, toType) {
+        const { workerPrice, materielPrice } = this.args;
+        const { wokerCount, materialCount } = toType;
+        return (
+          workerPrice * wokerCount +
+          materielPrice * materialCount -
+          (from ? this.depreciationPrice(from) : 0)
+        );
+      }
+
+      repaireCast(building) {
+        return (
+          this.upgradeCast(undefined, building) * (building.depreciation || 0)
+        );
+      }
+
+      depreciationPrice(building) {
+        const { materielPrice } = this.args;
+        const { materialCount, depreciation } = building;
+        return materielPrice * materialCount * (1 - (depreciation || 0));
+      }
+
+      buildingTotalPrice(building, unserSell) {
+        return (
+          (this.args.landPrice + this.depreciationPrice(building)) *
+          (unserSell ? this.args.underSellRate : 1)
+        );
+      }
+
+      trade(add, remove, publicPlayer, count) {
+        const { taxRate } = this.args.policies;
+        const tax = count * taxRate;
+        add.money += count - tax;
+        remove.money -= count;
+        publicPlayer.money += tax;
+      }
+    }
+
+    class App {
+      constructor() {
+        /** @type { Object.<string,HTMLElement> } */
+        this.components;
+        registerProperties(
+          this,
+          "theme",
+          "themeStr",
+          "languages",
+          "cities",
+          "cityName",
+          "width",
+          "height",
+          "terrains",
+          "landAmount",
+          "maxStep",
+          "running",
+          "players",
+          "publicPlayer",
+          "player",
+          "playerController",
+          "nextPlayerController",
+          "currentPlayer",
+          "rollingDice",
+          "currentTerrain",
+          "selectedPlayer",
+          "finished"
+        );
+        this.STATE_KEY = "state";
+        this.configManager = new ConfigManager();
+      }
+
+      selectBuilding(building) {}
+
+      selectPlayer(player) {
+        this.selectedPlayer = player;
+      }
+
+      toggleAutoManage() {
+        if (this.nextPlayerController) {
+          this.nextPlayerController = undefined;
+        } else {
+          this.nextPlayerController = this.playerController
+            ? new AiController(this.player)
+            : new PlayerController(this.player);
+        }
+      }
+
+      initData(data) {
+        const base = data?.cities[this.configManager.baseKey];
+        if (base) {
+          this.configManager.updateChildren(
+            base,
+            undefined,
+            "themes",
+            "buildings",
+            "maps",
+            "units",
+            "languages"
+          );
+          Object.values(base.buildings).forEach((b) => {
+            for (let sname of ["consumerSkills", "ownerSkills"]) {
+              if (!b[sname]) {
+                continue;
+              }
+              this.configManager.updateChild(b, sname);
+              Object.values(b[sname]).forEach((s) => {
+                this.configManager.updateChild(s, "args");
+              });
+            }
+          });
+        }
+        base.theme = base.themes[base.theme];
+        this.configManager.updateChild(data, "cities");
+        return data;
+      }
+
+      async loadState() {
+        try {
+          return (
+            JSON.parse(await Api.localStorage.getItem(this.STATE_KEY)) || {}
+          );
+        } catch {
+          return {};
+        }
+      }
+
+      async saveState(state) {
+        try {
+          await Api.localStorage.setItem(this.STATE_KEY, JSON.stringify(state));
+        } catch {}
+      }
+
+      async start() {
+        /** @type { { toast:(msg:string, timeout:number = 1000)=>Promise<any> } } */
+        this.modal_ = this.components.modal.model;
+        this.state = await this.loadState();
+        this.cities = Object.keys(this.data.cities);
+        let cityName = this.state.cityName;
+        if (!cityName || !this.data.cities[cityName]) {
+          cityName = this.cities[0];
+        }
+        await this.loadCity(cityName);
+      }
+
+      async waitingPause() {
+        return this.waitingPauseObject?.task;
+      }
+
+      async tryBuyBuilding(player, building) {
+        const cast = this.calculator.buildingTotalPrice(building);
+        if (cast > player.money) {
+          await this.toastNotEnoughMoney();
+          return;
+        }
+        await this.buyBuilding(player, building);
+      }
+
+      async buyBuilding(player, building) {
+        const cast = this.calculator.buildingTotalPrice(building);
+        const { owner } = building;
+        this.calculator.trade(owner, player, this.publicPlayer, cast);
+        if (owner.terrain === building.terrain) {
+          owner.currentBuilding = undefined;
+        }
+        owner.removeBuiding(building);
+        player.addBuilding(building);
+        building.purchasable = undefined;
+        if (player.terrain === building.terrain) {
+          player.currentBuilding = building;
+        }
+      }
+
+      async gameLoop() {
+        while (!this.finished) {
+          for (let p of this.players) {
+            await this.waitingPause();
+            if (!p.controller || p.defeat) {
+              continue;
+            }
+            if (this.nextPlayerController) {
+              this.player.controller = this.nextPlayerController;
+              this.playerController =
+                this.nextPlayerController instanceof PlayerController
+                  ? this.nextPlayerController
+                  : undefined;
+              this.nextPlayerController = undefined;
+            }
+            this.calculator.update(this.landAmount);
+            await this.updatePublic();
+            for (let p of this.players) {
+              if (!p.controller || p.defeat) {
+                continue;
+              }
+              const interest = this.calculator.interest(p);
+              if (interest > 0) {
+                this.calculator.trade(
+                  p,
+                  this.publicPlayer,
+                  this.publicPlayer,
+                  interest
+                );
+              } else if (interest < 0) {
+                this.calculator.trade(
+                  this.publicPlayer,
+                  p,
+                  this.publicPlayer,
+                  -interest
+                );
+              }
+              for (let b of p.buildings) {
+                b.update(this.calculator);
+              }
+            }
+
+            const isPlayer = p === this.player;
+            this.currentPlayer = p;
+            const controller = p.controller;
+            const name = isPlayer ? "player" : p.name;
+            await this.modal_.toast(
+              `${this.languages.turnTo}【${this.languages[name]}】`
+            );
+            await this.waitingPause();
+            await controller.waitingRoll?.();
+            let dice = await this.roll(isPlayer && this.playerController);
+            this.modal_.toast(
+              `【${this.languages[name]}】${this.languages.diceWith}${dice}`
+            );
+            const assetInjection = this.calculator.assetInjection(dice);
+            p.money += assetInjection;
+
+            await this.moveForward(p, dice);
+
+            const building = await this.findBuildingAt(p.terrain);
+            if (isPlayer) {
+              building?.updateSkills();
+            }
+            const consume = this.calculator.consume(p, building);
+            if (consume) {
+              this.calculator.trade(
+                building.owner,
+                p,
+                this.publicPlayer,
+                consume
+              );
+            }
+            p.currentBuilding = building;
+            if (isPlayer) {
+              this.player.currentTerrainPrice = this.calculator.landPrice(
+                this.player.terrain
+              );
+              if (building) {
+                this.player.currentBuildingPrice = this.calculator.buildingTotalPrice(
+                  building
+                );
+              }
+            }
+            await this.waitingPause();
+            await controller.waitingFinish(
+              this,
+              this.calculator,
+              async (to, from) => {
+                if (!to) {
+                  await this.waitingPause();
+                  const landPrice = this.calculator.landPrice(p.terrain);
+                  this.calculator.trade(
+                    this.publicPlayer,
+                    p,
+                    this.publicPlayer,
+                    landPrice
+                  );
+                  this.landAmount--;
+                  await this.addEmptyBuilding(p, p.terrain);
+                } else {
+                  await this.waitingPause();
+                  const cast = this.calculator.upgradeCast(from, to);
+                  p.money -= cast;
+                  await this.upgradeBuilding(from, to);
+                }
+              },
+              this.buyBuilding.bind(this)
+            );
+
+            //
+            if (p.money < 0) {
+              await this.waitingPause();
+              await controller.waitingFinance(async (b) => {
+                await this.waitingPause();
+                const cast = this.calculator.buildingTotalPrice(b, true);
+                this.calculator.trade(
+                  p,
+                  this.publicPlayer,
+                  this.publicPlayer,
+                  cast
+                );
+                if (p.terrain === b.terrain) {
+                  p.currentBuilding = undefined;
+                }
+                p.removeBuiding(b);
+                this.publicPlayer.addBuilding(b);
+                b.purchasable = true;
+              });
+              if (p.money < 0) {
+                await this.waitingPause();
+                await this.modal_.toast(
+                  `【${this.languages[name]}】${this.languages.bankrupt}`
+                );
+                if (isPlayer) {
+                  this.finished = "defeat";
+                  break;
+                }
+                p.defeat = true;
+                if (
+                  this.players.some(
+                    (u) => u.controller && u !== this.player && !u.defeat
+                  )
+                ) {
+                  continue;
+                }
+                this.finished = "win";
+                break;
+              }
+            }
+          }
+        }
+        await this.waitingPause();
+        this.currentPlayer = undefined;
+      }
+
+      async toastNotEnoughMoney() {
+        await this.modal_.toast(this.languages.moneyNotEnough);
+      }
+
+      async tryBuyLand(player, terrain) {
+        const landPrice = this.calculator.landPrice(terrain);
+        if (landPrice > player.money) {
+          await this.toastNotEnoughMoney();
+          return;
+        }
+        this.calculator.trade(
+          this.publicPlayer,
+          player,
+          this.publicPlayer,
+          landPrice
+        );
+        this.landAmount--;
+        await this.addEmptyBuilding(player, terrain);
+      }
+
+      async tryUpgradeBuilding(from, toType) {
+        const cast = this.calculator.upgradeCast(from, toType);
+        const player = from.owner;
+        if (cast > player.money) {
+          await this.toastNotEnoughMoney();
+          return;
+        }
+        player.money -= cast;
+        await this.upgradeBuilding(from, toType);
+      }
+
+      async sellBuilding(building, underSell) {
+        const player = building.owner;
+        const price = this.calculator.buildingTotalPrice(building, underSell);
+        this.calculator.trade(
+          player,
+          this.publicPlayer,
+          this.publicPlayer,
+          price
+        );
+        player.removeBuiding(building);
+        this.publicPlayer.addBuilding(building);
+        building.purchasable = true;
+        if (
+          player === this.player &&
+          player.money >= 0 &&
+          this.playerController.waitingFinanceTask
+        ) {
+          await this.playerController.waitingFinanceFinish();
+        }
+      }
+
+      async upgradeBuilding(from, toType) {
+        const player = from.owner;
+        let to = await this.createBuilding(toType, from);
+        to.terrain = from.terrain;
+        player.replceBuiding(from, to);
+        if (to.terrain === player.terrain) {
+          player.currentBuilding = to;
+        }
+      }
+
+      async createBuildSkill(building, pre, current, next) {
+        const skill = new Skill();
+        skill.group = pre ? "upgrade" : "build";
+        skill.name = next.__id;
+        skill.update = async () => {
+          skill.cast = this.calculator.upgradeCast(building, next);
+        };
+        await skill.update();
+        skill.release = async () => {
+          if (skill.disabled) {
+            return;
+          }
+          skill.disabled = true;
+          await this.tryUpgradeBuilding(building, next);
+          skill.disabled = undefined;
+        };
+        return new SkillTuple([skill]);
+      }
+
+      async createBuildingSkill(sInfo) {
+        const func = sInfo.func;
+        const skills = [];
+        for (let argInfo of this.configManager.getChildren(sInfo.args)) {
+          const skill = new Skill();
+          skill.name = argInfo.__id;
+          const arg = Object.assign({}, argInfo);
+          delete arg.__id;
+          skill.release = async () => {
+            if (skill.tuple.disabled) {
+              return;
+            }
+            skill.tuple.disabled = true;
+            await this.calculator[func]?.(arg);
+          };
+          skills.push(skill);
+        }
+        const tuple = new SkillTuple(skills);
+        tuple.name = sInfo.__id;
+        tuple.update = () => {
+          tuple.disabled = undefined;
+        };
+        return tuple;
+      }
+
+      async createRepairSkill(building) {
+        const repairSkill = new Skill();
+        const tuple = new SkillTuple([repairSkill]);
+        repairSkill.name = "repair";
+        repairSkill.update = async () => {
+          repairSkill.cast = this.calculator.repaireCast(building);
+          tuple.disabled = repairSkill.cast === 0;
+        };
+        await repairSkill.update();
+        repairSkill.release = async () => {
+          if (repairSkill.disabled) {
+            return;
+          }
+          repairSkill.disabled = true;
+          await this.tryRepairBuilding(building);
+          await repairSkill.update();
+          repairSkill.disabled = undefined;
+          tuple.disabled = repairSkill.cast === 0;
+        };
+        return tuple;
+      }
+
+      async createDestorySkill(building) {
+        const destorySkill = new Skill();
+        destorySkill.name = "destory";
+        destorySkill.update = async () => {
+          destorySkill.cast = this.calculator.depreciationPrice(building);
+        };
+        await destorySkill.update();
+        destorySkill.release = async () => {
+          if (destorySkill.disabled) {
+            return;
+          }
+          destorySkill.disabled = true;
+          const cast = this.calculator.depreciationPrice(building);
+          this.calculator.trade(
+            building.owner,
+            this.publicPlayer,
+            this.publicPlayer,
+            cast
+          );
+          this.addEmptyBuilding(building.owner, building.terrain);
+          building.owner.removeBuiding(building);
+          destorySkill.disabled = undefined;
+        };
+        const tuple = new SkillTuple([destorySkill]);
+        tuple.danger = true;
+        return tuple;
+      }
+
+      async createSellSkill(building) {
+        const sellSkill = new Skill();
+        sellSkill.danger = true;
+        sellSkill.name = "sell";
+        sellSkill.update = async () => {
+          sellSkill.cast = this.calculator.buildingTotalPrice(building);
+        };
+        await sellSkill.update();
+        sellSkill.release = async () => {
+          if (sellSkill.disabled) {
+            return;
+          }
+          sellSkill.disabled = true;
+          const cast = this.calculator.buildingTotalPrice(building);
+          this.calculator.trade(
+            building.owner,
+            this.publicPlayer,
+            this.publicPlayer,
+            cast
+          );
+          if (building.terrain === building.owner.terrain) {
+            building.owner.currentBuilding = undefined;
+          }
+          building.owner.removeBuiding(building);
+          this.landAmount++;
+          sellSkill.disabled = undefined;
+        };
+        const tuple = new SkillTuple([sellSkill]);
+        tuple.danger = true;
+        return tuple;
+      }
+
+      async createDefaultBuildingSkills(building, sellOnly) {
+        if (sellOnly) {
+          return [await this.createSellSkill(building)];
+        }
+        return [
+          await this.createRepairSkill(building),
+          await this.createDestorySkill(building),
+          await this.createSellSkill(building),
+        ];
+      }
+
+      async tryRepairBuilding(building) {
+        const { owner } = building;
+        const cast = this.calculator.repaireCast(building);
+        if (owner.money < cast) {
+          await this.toastNotEnoughMoney();
+          return;
+        }
+        owner.money -= cast;
+        building.depreciation = 0;
+        building.needRepair = undefined;
+      }
+
+      async createBuilding(bInfo, from = undefined) {
+        const building = new Building();
+        Object.assign(building, bInfo, { name: bInfo.__id });
+        const upgradeSkills = (bInfo.upgrades || []).map((t) =>
+          this.createBuildSkill(building, from, bInfo, this.buildingTypes[t])
+        );
+        const defaultSkills = await this.createDefaultBuildingSkills(
+          building,
+          from === undefined
+        );
+        building.ownerSkills = [
+          ...(await Promise.all(upgradeSkills)),
+          ...(await Promise.all(
+            (this.configManager.getChildren(bInfo.ownerSkills) || []).map((s) =>
+              this.createBuildingSkill(s)
+            )
+          )),
+          ...defaultSkills,
+        ];
+        building.consumerSkills = [
+          ...(await Promise.all(
+            (
+              this.configManager.getChildren(bInfo.consumerSkills) || []
+            ).map((s) => this.createBuildingSkill(s))
+          )),
+        ];
+        return building;
+      }
+
+      async addEmptyBuilding(player, terrain) {
+        const empty = await this.createBuilding(this.emptyBuildingType);
+        empty.terrain = terrain;
+        player.addBuilding(empty);
+        if (empty.terrain === player.terrain) {
+          player.currentBuilding = empty;
+        }
+        return empty;
+      }
+
+      async findBuildingAt(terrain) {
+        for (const player of this.players) {
+          const building = player.buildings.find((b) => b.terrain === terrain);
+          if (building) {
+            return building;
+          }
+        }
+      }
+
+      async moveForward(unit, step) {
+        while (step > 0) {
+          await this.waitingPause();
+          step--;
+          if (unit.terrain.nexts.length < 2) {
+            unit.terrain = unit.terrain.nexts[0];
+          } else {
+            unit.terrain =
+              unit.terrain.nexts[
+                Math.floor(Math.random() * unit.terrain.nexts.length)
+              ];
+          }
+          await sleep(100);
+        }
+      }
+
+      async updatePublic() {
+        if (!this.publicPlayer?.buildings?.length) {
+          return;
+        }
+        for (let b of this.publicPlayer.buildings) {
+          if (b.needRepair) {
+            const cast = this.calculator.repaireCast(b);
+            this.publicPlayer.money -= cast;
+            b.depreciation = 0;
+            b.needRepair = undefined;
+          }
+        }
+      }
+
+      async roll(isPlayer) {
+        let rollingCount = 6;
+        if (!isPlayer) {
+          rollingCount = 1;
+        }
+        const dices = Array.from(
+          { length: rollingCount },
+          () => Math.floor(Math.random() * this.maxStep) + 1
+        );
+        if (!isPlayer) {
+          return dices[dices.length - 1];
+        }
+        for (let dice of dices) {
+          this.rollingDice = dice;
+          await this.waitingPause();
+          await sleep(50);
+        }
+        await this.waitingPause();
+        await sleep(500);
+        this.rollingDice = undefined;
+        return dices[dices.length - 1];
+      }
+
+      async shutdown() {
+        if (this.running) {
+          this.toggleRunning();
+        }
+        await Api.appService.close();
+      }
+
+      async selectCity() {
+        const cityName = (
+          await this.modal_.select(
+            this.languages.select,
+            this.cities.map((value) => ({
+              value,
+              displayName: this.languages[value] || value,
+            })),
+            Math.max(
+              0,
+              this.cities.findIndex((s) => s === this.cityName)
+            ),
+            { itemName: "displayName" }
+          )
+        )?.value;
+        if (!cityName || cityName === this.cityName) {
+          return;
+        }
+        await this.reloadWindow(cityName);
+      }
+
+      async loadNextCity() {
+        let idx = this.cities.findIndex((c) => c === this.cityName);
+        idx++;
+        let cityName = this.cities[idx];
+        if (!cityName) {
+          await this.modal_.toast(this.languages.allRestart);
+          cityName = this.cities[0];
+        }
+        await this.reloadWindow(cityName);
+      }
+
+      async reloadWindow(cityName) {
+        await this.saveState({ ...this.state, cityName });
+        window.location.reload();
+      }
+
+      toggleRunning(finishedWaiting = false) {
+        if (!finishedWaiting && this.finished) {
+          window.location.reload();
+          return;
+        }
+        this.running = !this.running;
+        if (!this.running) {
+          const waitingPauseObject = {};
+          waitingPauseObject.task = new Promise(
+            (resolve) => (waitingPauseObject.resolve = resolve)
+          );
+          this.waitingPauseObject = waitingPauseObject;
+        } else if (this.waitingPauseObject) {
+          const { resolve } = this.waitingPauseObject;
+          this.waitingPauseObject = undefined;
+          resolve();
+        }
+      }
+
+      async loadCity(cityName) {
+        this.cityName = undefined;
+        this.running = true;
+        await this.saveState({ ...this.state, cityName });
+        const cityInfo = this.data.cities[cityName];
+        this.buildingTypes = cityInfo.buildings;
+        this.emptyBuildingType = this.buildingTypes.b0000;
+        this.calculator = new Calculator(cityInfo.initArgs);
+        this.languages = Object.values(cityInfo.languages)[0];
+        const map = this.configManager.mergeObj(
+          cityInfo.map || {},
+          cityInfo.maps[
+            cityInfo.mapRef || cityInfo[this.configManager.defaultKeyName]
+          ]
+        );
+        Object.assign(cityInfo, map);
+        await this.loadTerrains(cityInfo);
+        await this.loadPlayers(cityInfo);
+        this.finished = undefined;
+        this.maxStep = cityInfo.maxStep;
+        this.cityName = cityName;
+        // await this.toggleAutoManage()
+        // this.toggleRunning()
+        await this.gameLoop();
+        console.log(this.finished);
+        if (this.running) {
+          this.toggleRunning(true);
+        }
+        await this.modal_.toast(
+          `${this.languages[this.finished]}`,
+          2000,
+          this.waitingPause()
+        );
+        if (this.finished === "defeat") {
+          await this.reloadWindow(this.cityName);
+        } else {
+          await this.loadNextCity();
+        }
+      }
+
+      async restart() {
+        await this.reloadWindow(this.cityName);
+      }
+
+      async loadTerrains(info) {
+        this.theme = info.theme;
+        let randomTerrains = [];
+        let themeStr = `
+:host{
+${Object.entries(this.theme)
+  .filter(([_, value]) => value)
+  .map(([key, value]) => `\t--${key}:${value};\n`)
+  .join("")}
+}`;
+        this.width = info.types[0].length;
+        this.height = info.types.length;
+        let maxData = info.groupCount || 0;
+        this.terrains = this.updateConnections(
+          Array.from({ length: this.height }, (_y, y) =>
+            Array.from({ length: this.width }, (_x, x) => {
+              const terrain = new Terrain();
+              terrain.x = x;
+              terrain.y = y;
+              const type = info.types[y][x];
+              const data = info.datas?.[y]?.[x] || "0";
+              terrain.type =
+                [Terrain.Types.EMPTY, Terrain.Types.GROUND, Terrain.Types.ROAD][
+                  type
+                ] || Terrain.Types.EMPTY;
+              terrain.data = data;
+              maxData = Math.max(data, maxData);
+              terrain.nexts = [];
+              if (terrain.type === Terrain.Types.ROAD) {
+                randomTerrains.push([terrain, Math.random()]);
+              }
+              return terrain;
+            })
+          ),
+          info
+        );
+        for (let data = 0; data <= maxData; data++) {
+          themeStr += `
+        .data-${data}{
+          --bg: var(--${data}-bg);
+          --fg: var(--${data}-fg);
+          background: var(--bg);
+          color: var(--fg);
+        }
+        `;
+        }
+        randomTerrains.sort((i, j) => i[1] - j[1]);
+        this.randomTerrains = randomTerrains.map((i) => i[0]);
+        this.landsPerPlayer = Math.floor(
+          this.randomTerrains.length / (info.playerCount || 2)
+        );
+        this.themeStr = themeStr;
+      }
+
+      updateConnections(/**@type {Terrain[][]}*/ terrains, info) {
+        const starts = (
+          info.direction ||
+          (info.start
+            ? [info.start, { x: info.start.x, y: info.start.y + 1 }]
+            : [
+                { x: 0, y: 0 },
+                { x: 0, y: 1 },
+              ])
+        ).map(({ x, y }) => terrains[y][x]);
+        const visiteds = new Set();
+        const dns = [
+          [0, 1],
+          [1, 0],
+          [0, -1],
+          [-1, 0],
+        ];
+        dns.reverse();
+        const findNeighbours = (/**@type {Terrain}*/ terrain) => {
+          const { x, y } = terrain;
+          /**@type {Terrain[]}*/
+          const neighbours = [];
+          for (let [dx, dy] of dns) {
+            const n = terrains[y + dy]?.[x + dx];
+            if (n && n.type === Terrain.Types.ROAD) {
+              neighbours.push(n);
+            }
+          }
+          if (neighbours.length < 2) {
+            throw "Invalid Map";
+          }
+          return neighbours;
+        };
+        const handleTerrain = (
+          /**@type {Terrain}*/ current,
+          /**@type {Terrain}*/ previous,
+          /**@type {Array<any>}*/ stack
+        ) => {
+          if (visiteds.has(current)) {
+            if (stack.length) {
+              handleTerrain(...stack.shift(), stack);
+            }
+            if (previous.nexts.findIndex((n) => n === current) < 0) {
+              current.nexts.push(previous);
+            }
+            return;
+          }
+          visiteds.add(current);
+          previous.nexts.push(current);
+          let neighbours = findNeighbours(current);
+          let previousIdx = neighbours.findIndex((n) => n === previous);
+          neighbours = [
+            ...neighbours.slice(previousIdx + 1),
+            ...neighbours.slice(0, previousIdx),
+          ];
+          neighbours.slice(1).forEach((n) => stack.push([n, current]));
+          handleTerrain(neighbours[0], current, stack);
+        };
+        handleTerrain(starts[1], starts[0], []);
+        return terrains;
+      }
+
+      async loadPlayers(info) {
+        const players = [];
+        const usedTerrains = new Set();
+        const start = info.start || { x: 0, y: 0 };
+        let avaliableUnits = new Map(Object.entries(info.units));
+        for (let pinfo of info.players || []) {
+          const player = new Player();
+          if (pinfo.group !== undefined) {
+            player.group = pinfo.group;
+          }
+          player.terrain =
+            this.terrains[pinfo.y !== undefined ? pinfo.y : start.y]?.[
+              pinfo.x !== undefined ? pinfo.x : start.x
+            ] || this.terrains[0][0];
+          player.controller = pinfo.player
+            ? new PlayerController(player)
+            : pinfo.unit && new AiController(player);
+          player.money =
+            pinfo.money === undefined
+              ? info.initMoneyPerLand * this.landsPerPlayer
+              : pinfo.money;
+          if (pinfo.unit) {
+            const name = Object.keys(pinfo.unit)[0];
+            avaliableUnits.delete(name);
+            const unit = this.configManager.mergeObj(
+              info.units[name],
+              pinfo.unit
+            );
+            Object.assign(player, unit, { name });
+          }
+          for (let b of pinfo.buildings || []) {
+            const name = b.building;
+            const binfo = info.buildings[name];
+            const building = await this.createBuilding(binfo);
+            if (b.y !== undefined && b.x !== undefined) {
+              building.terrain = this.terrains[b.y]?.[b.x];
+              if (building.terrain) {
+                usedTerrains.add(building.terrain);
+              }
+            }
+            player.addBuilding(building);
+          }
+          players.push(player);
+        }
+        const createPlayerCount = Math.max(
+          0,
+          info.playerCount - players.filter((p) => p.controller).length
+        );
+        const createPlayers = [];
+        for (let i = 0; i < createPlayerCount; i++) {
+          const player = new Player();
+          if (!avaliableUnits.size) {
+            avaliableUnits = new Map(Object.entries(info.units));
+          }
+          const unit = Array.from(avaliableUnits.values())[
+            Math.floor(Math.random() * avaliableUnits.size)
+          ];
+          const name = unit[this.configManager.defaultKeyName];
+          avaliableUnits.delete(name);
+          Object.assign(player, unit, { name });
+          player.terrain = this.terrains[start.y][start.x];
+          player.controller = new AiController(player);
+          player.money = info.initMoneyPerLand * this.landsPerPlayer;
+          players.push(player);
+          createPlayers.push(player);
+        }
+        let currentGroup = 0;
+        let currentRandomTerrainIdx = 0;
+        for (let p of players) {
+          for (let b of p.buildings) {
+            if (b.terrain) {
+              continue;
+            }
+            while (currentRandomTerrainIdx < this.randomTerrains.length) {
+              let t = this.randomTerrains[currentRandomTerrainIdx];
+              if (!usedTerrains.has(t)) {
+                b.terrain = t;
+                usedTerrains.add(t);
+                currentRandomTerrainIdx++;
+                break;
+              }
+              currentRandomTerrainIdx++;
+            }
+          }
+          if (!p.controller || p.group !== undefined) {
+            continue;
+          }
+          p.group = currentGroup;
+          currentGroup++;
+          if (currentGroup >= info.groupCount) {
+            currentGroup = 0;
+          }
+        }
+        const remainTerrains = this.randomTerrains.filter(
+          (t) => !usedTerrains.has(t)
+        );
+        this.landAmount = remainTerrains.length;
+        this.players = players;
+        this.publicPlayer = this.players.find((p) => !p.controller);
+        if (!this.publicPlayer) {
+          this.publicPlayer = new Player();
+        }
+        this.publicPlayer.props = this.calculator.policiesModel;
+        if (this.publicPlayer.money === undefined) {
+          this.publicPlayer.money =
+            info.initPublicMoneyPerLand * this.landsPerPlayer;
+        }
+        for (let t of remainTerrains.slice(
+          0,
+          remainTerrains.length * info.publicReserveLandRate
+        )) {
+          const building = await this.addEmptyBuilding(this.publicPlayer, t);
+          building.avatar = "🌴";
+        }
+        this.player = this.players.find(
+          (p) => p.controller instanceof PlayerController
+        );
+        if (!this.player) {
+          let from = createPlayers;
+          if (!from.length) {
+            from = this.players.filter((p) => p.controller);
+          }
+          const player = from[Math.floor(Math.random() * from.length)];
+          player.controller = new PlayerController(player);
+          this.player = player;
+        }
+        this.playerController = this.player.controller;
+      }
+
+      async selectTerrain(terrain) {
+        this.currentTerrain = terrain;
+      }
+    }
+  </script>
+  <template id="app-main" view-model="App">
+    <div>
+      <hv-stack class="app">
+        <style inner-html$.="themeStr"></style>
+        <img class="bg" if.="theme?.bgImg" src.="theme.bgImg" />
+        <h-spacer class="menu top">
+          <div class="player-infos info-items">
+            <div
+              for.="p of players"
+              onclick.="selectPlayer(p)"
+              if.="p.controller && !p.defeat"
+              class="player-info info-item"
+              class-highlight.="p===currentPlayer"
+            >
+              <span
+                class.="'prop data data-'+p.group"
+                inner-text$.="languages[p===player?'player':p.name]"
+              ></span>
+              <span
+                class="value"
+                inner-text$.="p.money.toLocaleString('zn-CH',{style:'currency',currency:'CNY'})"
+              ></span>
+            </div>
+          </div>
+          <div class="policies info-items" if.="publicPlayer&&publicPlayer.props">
+            <div class="policy info-item" for.="policy of publicPlayer.props">
+              <span class="prop" inner-text$.="languages[policy.prop]"></span>
+              <span class="value" inner-text$.="policy.value.toString()"></span>
+            </div>
+          </div>
+          <div class="map-info">
+            <h-spacer></h-spacer>
+            <div
+              class="button"
+              onclick.="toggleAutoManage()"
+              inner-text$.="(!playerController&&nextPlayerController)||(playerController&&!nextPlayerController)?'🚹':'🎦'"
+            ></div>
+            <div class="button" onclick.="restart()">🔄</div>
+            <div class="map-title">
+              <span
+                if.="cityName"
+                onclick.="selectCity()"
+                inner-text$.="languages[cityName]||cityName"
+              ></span>
+            </div>
+            <div
+              class="button"
+              onclick.="toggleRunning()"
+              inner-text$.="(!running || finished)?'▶️':'⏹'"
+            ></div>
+            <div class="button" onclick.="shutdown()">⏺</div>
+            <h-spacer></h-spacer>
+          </div>
+        </h-spacer>
+        <h-square class="game-panel">
+          <div class="layers">
+            <div class="layer cell-layer ground-layer">
+              <div for.="col of terrains">
+                <div
+                  for.="t of col"
+                  class="terrain-wraper"
+                  onclick.="selectTerrain(t)"
+                >
+                  <div if.="t.type!=='ground'" class="empty"></div>
+                  <div if.="t.type==='ground'" class="terrain ground">
+                    <div class.="'data data-'+t.data"></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div class="layer cell-layer road-layer">
+              <div for.="col of terrains">
+                <div
+                  for.="t of col"
+                  class="terrain-wraper"
+                  onclick.="selectTerrain(t)"
+                >
+                  <div if.="t.type!=='road'" class="empty"></div>
+                  <div if.="t.type==='road'" class="terrain road">
+                    <div class="road"></div>
+                    <div class.="'data data-'+t.data"></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div if.="currentTerrain" class="layer selection-layer">
+              <div
+                class="selection selection-current object"
+                style-left$.="100*currentTerrain.x/width+'%'"
+                style-top$.="100*currentTerrain.y/height+'%'"
+                style-width$.="100/width+'%'"
+                style-height$.="100/height+'%'"
+              ></div>
+              <div for.="t of currentTerrain.nexts">
+                <div
+                  class="selection selection-next object"
+                  style-left$.="100*t.x/width+'%'"
+                  style-top$.="100*t.y/height+'%'"
+                  style-width$.="100/width+'%'"
+                  style-height$.="100/height+'%'"
+                ></div>
+              </div>
+            </div>
+            <div if.="players" class="layer building-layer">
+              <div for.="p of players">
+                <div for.="building of p.buildings">
+                  <div
+                    class.="'building object data data-'+building.owner.group"
+                    class-danger.="building.needRepair"
+                    if.="building.avatar"
+                    onclick.="selectBuilding(building)"
+                    style-left$.="100*building.terrain.x/width+'%'"
+                    style-top$.="100*building.terrain.y/height+'%'"
+                    style-width$.="100/width+'%'"
+                    style-height$.="100/height+'%'"
+                  >
+                    <div>
+                      <span class="avatar" inner-text$.="building.avatar"></span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div if.="players" class="layer player-layer">
+              <div for.="p of players" if.="p.controller && !p.defeat">
+                <div
+                  class.="'player object data-'+p.group"
+                  class-current-player.="p===currentPlayer"
+                  onclick.="selectPlayer(p)"
+                  style-left$.="100*p.terrain.x/width+'%'"
+                  style-top$.="100*p.terrain.y/height+'%'"
+                  style-width$.="100/width+'%'"
+                  style-height$.="100/height+'%'"
+                ></div>
+              </div>
+            </div>
+          </div>
+        </h-square>
+        <h-spacer class="menu bottom">
+          <div
+            if.="playerController && playerController.waitingRollTask"
+            class="control-panel"
+          >
+            <div class="btn-roll" onclick.="playerController.waitingRollFinish()">
+              <span class="btn-dice">🎲</span>
+            </div>
+          </div>
+          <div
+            if.="playerController && playerController.waitingFinishTask"
+            class="control-panel control-panel-bg"
+          >
+            <div if.="playerController.waitingFinishTask" class="building-info">
+              <span
+                class="avatar"
+                inner-text$.="player.currentBuilding?player.currentBuilding.avatar:'🌱'"
+              ></span>
+              <span
+                class="name"
+                class-danger.="player.currentBuilding?.needRepair"
+                inner-text$.="languages[player.currentBuilding?player.currentBuilding.name:'land']"
+              ></span>
+            </div>
+            <div if.="playerController.waitingFinishTask" class="skill-panel">
+              <div
+                class="skills"
+                if.="player.currentBuilding&&player.currentBuilding.owner===player&&player.currentBuilding.ownerSkills"
+              >
+                <div
+                  class="skill-tuple"
+                  for.="tuple of player.currentBuilding.ownerSkills"
+                  class-hidden.="tuple.disabled"
+                  class-danger.="tuple.danger"
+                >
+                  <span
+                    if.="tuple.name"
+                    inner-text$.="languages[tuple.name]"
+                  ></span>
+                  <div
+                    class="skill"
+                    class-hidden.="skill.disabled"
+                    for.="skill of tuple.skills"
+                    onclick.="skill.release()"
+                  >
+                    <span
+                      if.="skill.group"
+                      inner-text$.="languages[skill.group]"
+                    ></span>
+                    <span
+                      inner-text$.="languages[skill.name]"
+                      class="skill-highlight"
+                    ></span>
+                    <span
+                      if.="skill.cast"
+                      inner-text$.="skill.cast.toLocaleString('zn-CH',{style:'currency',currency:'CNY'})"
+                      class="value"
+                    ></span>
+                  </div>
+                </div>
+              </div>
+              <div
+                class="skills"
+                if.="player.currentBuilding&&player.currentBuilding.owner!==player&&player.currentBuilding.consumerSkills"
+              >
+                <div
+                  class="skill-tuple"
+                  for.="tuple of player.currentBuilding.consumerSkills"
+                  class-hidden.="tuple.disabled"
+                  class-danger.="tuple.danger"
+                >
+                  <span
+                    if.="tuple.name"
+                    inner-text$.="languages[tuple.name]"
+                  ></span>
+                  <div
+                    class="skill"
+                    class-hidden.="skill.disabled"
+                    for.="skill of tuple.skills"
+                    onclick.="skill.release()"
+                  >
+                    <span
+                      if.="skill.group"
+                      inner-text$.="languages[skill.group]"
+                    ></span>
+                    <span
+                      inner-text$.="languages[skill.name]"
+                      class="skill-highlight"
+                    ></span>
+                    <span
+                      if.="skill.cast"
+                      inner-text$.="skill.cast.toLocaleString('zn-CH',{style:'currency',currency:'CNY'})"
+                    ></span>
+                  </div>
+                </div>
+              </div>
+              <div
+                class="skills"
+                if.="player.currentBuilding&&player.currentBuilding.owner!==player&&player.currentBuilding.purchasable"
+              >
+                <div class="skill-tuple">
+                  <div
+                    class="skill"
+                    onclick.="tryBuyBuilding(player, player.currentBuilding)"
+                  >
+                    <span inner-text$.="languages.buy"></span>
+                    <span
+                      class="skill-highlight"
+                      inner-text$.="player.currentBuildingPrice.toLocaleString('zn-CH',{style:'currency',currency:'CNY'})"
+                    ></span>
+                  </div>
+                </div>
+              </div>
+              <div class="skills" if.="!player.currentBuilding">
+                <div class="skill-tuple">
+                  <div
+                    class="skill"
+                    onclick.="tryBuyLand(player, player.terrain)"
+                  >
+                    <span inner-text$.="languages.buyLand"></span>
+                    <span
+                      class="skill-highlight"
+                      inner-text$.="player.currentTerrainPrice.toLocaleString('zn-CH',{style:'currency',currency:'CNY'})"
+                    ></span>
+                  </div>
+                </div>
+              </div>
+              <div class="skills">
+                <div class="skill-tuple danger">
+                  <div class="skill">
+                    <span
+                      inner-text$.="languages.finish"
+                      onclick.="playerController.waitingFinishFinish()"
+                    ></span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </h-spacer>
+        <pop-up if.="rollingDice" class="dice-wraper">
+          <div class="dice">
+            <span inner-text$.="rollingDice"></span>
+          </div>
+        </pop-up>
+        <pop-up
+          if.="(selectedPlayer===player)||(playerController&&playerController.waitingFinanceTask&&player.money&lt;0)"
+          class="finance-wraper"
+          onclick.="selectPlayer();playerController?.waitingFinanceFinish?.()"
+        >
+          <div class="finance" onclick="event.stopPropagation()">
+            <div class="title">
+              <span class="prop" inner-text$.="languages.money"></span>
+              <span
+                class="value"
+                inner-text$.="player.money.toLocaleString('zn-CH',{style:'currency',currency:'CNY'})"
+              ></span>
+            </div>
+            <div class="finance-items">
+              <div for.="b of player.buildings" class="finance-item">
+                <span>
+                  <span class="name" inner-text$.="languages[b.name]"></span>
+                  <span class="position">
+                    (<span inner-text$.="b.terrain.x"></span>,<span
+                      inner-text$.="b.terrain.y"
+                    ></span
+                    >)
+                  </span>
+                </span>
+                <span
+                  onclick.="sellBuilding(b,true)"
+                  class="button"
+                  if.="!(player===currentPlayer&&b===player.currentBuilding)"
+                  inner-text$.="languages.undersell"
+                ></span>
+                <span
+                  onclick.="sellBuilding(b)"
+                  class="button"
+                  if.="(player===currentPlayer&&b===player.currentBuilding)"
+                  inner-text$.="languages.sell"
+                ></span>
+              </div>
+            </div>
+          </div>
+        </pop-up>
+      </hv-stack>
+      <modal-panel id="modal"></modal-panel>
+    </div>
+    <style>
+      :host {
+        display: block;
+      }
+
+      .app {
+        width: 100%;
+        height: 100%;
+        position: absolute;
+        top: 0;
+        left: 0;
+      }
+
+      .bg {
+        object-fit: cover;
+        filter: blur(10px);
+        opacity: 0.6;
+        width: 100%;
+        height: 100%;
+        position: absolute;
+        pointer-events: none;
+        z-index: -1;
+      }
+
+      .menu {
+        opacity: 0.8;
+        overflow: hidden;
+      }
+
+      .menu.top {
+        display: flex;
+        flex-direction: column;
+      }
+
+      .player-infos {
+        padding-top: 40px;
+        padding-bottom: 5px;
+        --bg: var(--0-bg);
+        --fg: var(--0-fg);
+      }
+
+      .policies {
+        padding-bottom: 3px;
+        padding-top: 3px;
+        --bg: var(--4-bg);
+        --fg: var(--4-fg);
+        font-size: small;
+      }
+
+      .info-items {
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        background: var(--bg);
+        color: var(--fg);
+      }
+
+      .info-item {
+        display: flex;
+        padding: 3px 0px;
+        align-items: center;
+      }
+
+      .policies .info-item {
+        padding: 0px;
+      }
+
+      .info-item .prop {
+        margin: 0 5px;
+        flex: 1;
+        white-space: nowrap;
+        text-align: center;
+        border-radius: 5px;
+        white-space: nowrap;
+        overflow-x: auto;
+      }
+
+      .policies .info-item .prop {
+        text-align: start;
+        padding-left: 5px;
+      }
+
+      .info-item .data.prop {
+        border: 1px solid;
+      }
+
+      .info-item.highlight .data.prop {
+        border-style: dashed;
+      }
+
+      .info-item .value {
+        margin: 0 5px;
+        background: var(--fg);
+        color: var(--bg);
+        border-radius: 5px;
+        padding: 0 1px;
+        flex: 1;
+        align-self: center;
+        text-align: center;
+        white-space: nowrap;
+      }
+
+      .map-info {
+        display: flex;
+        align-self: center;
+        align-items: center;
+      }
+
+      .map-info .map-title {
+        margin: 10px;
+        font-size: large;
+      }
+
+      .map-info .button {
+        margin: 0 5px;
+      }
+
+      .menu.bottom {
+        flex-direction: column;
+        justify-content: end;
+      }
+
+      .control-panel {
+        display: flex;
+        padding: 5px 15px 30px 15px;
+        overflow: hidden;
+      }
+
+      .control-panel.control-panel-bg {
+        background: var(--bg);
+        color: var(--fg);
+      }
+
+      .skill-panel {
+        display: flex;
+        flex: 1;
+        justify-content: space-between;
+        overflow: hidden;
+      }
+
+      .skills {
+        overflow: auto;
+      }
+
+      .skill-tuple {
+        --bg: var(--1-bg);
+        --fg: var(--1-fg);
+        display: flex;
+        background: var(--bg);
+        color: var(--fg);
+        margin: 5px;
+        padding: 2px 10px;
+        border-radius: 5px;
+        font-size: small;
+      }
+
+      .skill-tuple.danger {
+        --bg: var(--4-bg);
+        --fg: var(--4-fg);
+      }
+
+      .skill {
+      }
+
+      .skill-highlight {
+        background: var(--fg);
+        color: var(--bg);
+        margin: 0 1px;
+        padding: 0 1px;
+      }
+
+      .building-info {
+        width: 4em;
+        height: 4em;
+        border-radius: 10px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        margin: 0 10px 0 0;
+      }
+
+      .btn-roll {
+        flex: 1;
+        text-align: center;
+        align-self: center;
+      }
+
+      .btn-roll .btn-dice {
+        font-size: 3em;
+        text-shadow: 3px 3px 5px;
+      }
+
+      .building-info .avatar {
+        font-size: 2em;
+      }
+
+      .building-info .name {
+        font-size: 0.5em;
+      }
+
+      .building-info .danger {
+        color: var(--4-bg);
+      }
+
+      .game-panel {
+        position: relative;
+        transform: scale(0.9);
+        /* border-radius: 10px;
+      overflow: hidden;
+      box-shadow: 3px 3px 3px black, -1px -1px 1px #0004; */
+      }
+
+      .layer {
+        display: flex;
+        flex-direction: column;
+        width: 100%;
+        height: 100%;
+        box-sizing: border-box;
+        position: absolute;
+        pointer-events: none;
+      }
+
+      .bg,
+      .terrain > .road,
+      .layer.ground-layer {
+        background: var(--fbg);
+        background-color: var(--fbgColor);
+        background-size: var(--fbgSize);
+      }
+
+      .layer.ground-layer {
+        display: none;
+      }
+
+      .layer.road-layer {
+        filter: drop-shadow(3px 3px 3px black) drop-shadow(-1px -1px 1px #0004);
+      }
+
+      .cell-layer {
+        pointer-events: none;
+      }
+
+      .cell-layer > * {
+        display: flex;
+        flex-direction: row;
+        flex: 1;
+      }
+
+      .cell-layer > * > * {
+        flex: 1;
+      }
+
+      .selection-layer {
+      }
+
+      .selection {
+        border: 1px solid;
+      }
+
+      .selection-current {
+      }
+
+      .selection-next {
+      }
+
+      .terrain-wraper {
+        position: relative;
+        overflow: hidden;
+      }
+
+      .terrain,
+      .object {
+        pointer-events: all;
+      }
+
+      .terrain > * {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+      }
+
+      .terrain > .data {
+        opacity: 0.5;
+      }
+
+      .terrain.road > .data {
+        opacity: 0.15;
+      }
+
+      .object {
+        position: absolute;
+        align-items: center;
+        justify-content: center;
+        display: flex;
+        font-size: min(3vh, 1.7vw);
+      }
+
+      .object .avatar {
+        filter: drop-shadow(1px 1px 3px black);
+        font-size: 3.5em;
+      }
+
+      .object.building .avatar {
+      }
+
+      .object.building.danger {
+        background: linear-gradient(45deg, var(--bg) 0 50%, var(--fg) 50% 100%);
+      }
+
+      .finance {
+        background: var(--bg);
+        color: var(--fg);
+        width: 80vw;
+        max-height: 80vh;
+        padding: 10px;
+        border-radius: 10px;
+      }
+
+      .finance .title {
+        font-size: large;
+      }
+
+      .finance .title .prop {
+      }
+
+      .finance .title .value {
+        background: var(--0-bg);
+        color: var(--0-fg);
+        padding: 0 5px;
+        border-radius: 5px;
+        font-size: small;
+      }
+
+      .finance-items {
+        margin: 1rem 0;
+      }
+
+      .finance-item {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        background: var(--4-bg);
+        color: var(--4-fg);
+        padding: 0 5px;
+        border-radius: 5px;
+        margin: 5px 0;
+      }
+
+      .finance-item .name {
+      }
+
+      .finance-item .button {
+        background: var(--0-bg);
+        color: var(--0-fg);
+        padding: 2px 5px;
+        border-radius: 10px;
+        margin: 5px;
+        font-size: small;
+      }
+
+      @keyframes blinker {
+        50% {
+          opacity: 0;
+        }
+      }
+
+      .player {
+        background: unset;
+        color: unset;
+        box-shadow: 0 0 0 2px #fffd;
+        outline: dashed 2px var(--bg);
+      }
+
+      .current-player {
+        animation: blinker 1s ease-in-out infinite;
+        z-index: 1;
+      }
+
+      .dice-wraper {
+        background: unset;
+        backdrop-filter: unset;
+        pointer-events: none;
+      }
+
+      .dice {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 10px;
+        box-shadow: 3px 3px 5px #000;
+        color: #fff;
+        background: #0008;
+        font-size: 30px;
+        width: 2em;
+        height: 2em;
+      }
+
+      @media (orientation: landscape) {
+        .app {
+          flex-direction: row-reverse;
+        }
+      }
+
+      .hidden {
+        display: none !important;
+      }
+    </style>
+  </template>
+  <script>
+    window.appData = window.appData || {
+      cities: {
+        __base: {
+          themes: {
+            __base: {
+              "0-bg": "gold",
+              "0-fg": "black",
+              "1-bg": "green",
+              "1-fg": "white",
+              "2-bg": "blue",
+              "2-fg": "white",
+              "3-bg": "red",
+              "3-fg": "white",
+              "4-bg": "brown",
+              "4-fg": "white",
+              fg: "black",
+              bg: "white",
+              fbg:
+                "repeating-radial-gradient(circle at 0.5em 0.05em, transparent, transparent 0.2em, #EDE8D5 0.21em, #EDE8D5 0.3em, transparent 0.31em), repeating-radial-gradient(circle at 0.5em 0.95em, transparent, transparent 0.2em, #EDE8D5 0.21em, #EDE8D5 0.3em, transparent 0.31em)",
+              fbgColor: "#fff",
+              fbgSize: "1em 1em",
+              bgImg:
+                "data:image/png;base64,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",
+            },
+            light: {},
+            dark: {
+              fg: "#f5f5f5",
+              bg: "#333",
+              fbg:
+                "radial-gradient(rgba(255, 255, 255, 0.05) 20%, transparent) 0 0/20px 20px, radial-gradient(#FFCA08 6%, transparent 8%) 0 0/20px 20px, radial-gradient(#FFCA08 6%, transparent 8%) 10px 10px/20px 20px, linear-gradient(45deg, transparent 48%, #000000 49% 51%, transparent 52%) 0 0/20px 20px, linear-gradient(-45deg, transparent 48%, #000000 49% 51%, transparent 52%) 0 0/20px 20px",
+              fbgColor: "#262626",
+              fbgSize: null,
+              bgImg:
+                "data:image/png;base64,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",
+            },
+          },
+          theme: "light",
+          buildings: {
+            __base: {
+              depreciationIncRate: 0.001,
+              wokerCount: 1000,
+              materialCount: 5000,
+              operationWorkerCount: 5,
+              consumeRate: 100,
+            },
+            b0000: {
+              depreciation: 0,
+              materialCount: 0,
+              operationWorkerCount: 0,
+              depreciationIncRate: 0,
+              wokerCount: 0,
+              avatar: "🌳",
+              upgrades: ["b0003", "b0004", "b0005"],
+            },
+            b0001: {
+              avatar: "🏛",
+              consumeRate: 0,
+              consumerSkills: {
+                tax: {
+                  func: "updatePolicies",
+                  args: {
+                    inc: {
+                      taxRate: "taxRate*1.1",
+                    },
+                    dec: {
+                      taxRate: "taxRate*0.9",
+                    },
+                  },
+                },
+              },
+            },
+            b0002: {
+              avatar: "🏦",
+              consumeRate: 0,
+              consumerSkills: {
+                interestRate: {
+                  func: "updatePolicies",
+                  args: {
+                    inc: {
+                      interestRate: "interestRate*1.1",
+                    },
+                    dec: {
+                      interestRate: "interestRate*0.9",
+                    },
+                  },
+                },
+              },
+            },
+            b0003: {
+              avatar: "🏡",
+              operationWorkerCount: 10,
+              consumeRate: 200,
+              upgrades: ["b0006"],
+            },
+            b0004: {
+              avatar: "🛖",
+              upgrades: ["b0007"],
+            },
+            b0005: {
+              avatar: "🏝",
+              wokerCount: 500,
+              materialCount: 1000,
+              operationWorkerCount: 1,
+            },
+            b0006: {
+              avatar: "🏘",
+              wokerCount: 2000,
+              materialCount: 10000,
+              operationWorkerCount: 50,
+              consumeRate: 200,
+              upgrades: ["b0008"],
+            },
+            b0007: {
+              avatar: "🕌",
+              wokerCount: 2000,
+              materialCount: 10000,
+              operationWorkerCount: 20,
+            },
+            b0008: {
+              avatar: "🏩",
+              wokerCount: 5000,
+              materialCount: 10000,
+              operationWorkerCount: 100,
+              consumeRate: 300,
+            },
+          },
+          maps: {
+            NY: {
+              types: [
+                "22222222222",
+                "21121211112",
+                "21121211112",
+                "21121222222",
+                "21121111112",
+                "21122222112",
+                "21111112112",
+                "22222212112",
+                "21111212112",
+                "21111212112",
+                "22222222222",
+              ],
+              datas: [
+                "44444444444",
+                "40040400004",
+                "40040400004",
+                "40040444444",
+                "40040000004",
+                "40044444004",
+                "40000004004",
+                "44444404004",
+                "40000404004",
+                "40000404004",
+                "44444444444",
+              ],
+            },
+          },
+          languages: {
+            "zh-CN": {
+              allRestart: "全部完成，重新开始",
+              b0000: "闲置土地",
+              b0001: "市政大厅",
+              b0002: "税务局",
+              b0003: "饭店",
+              b0004: "超市",
+              b0005: "公园",
+              b0006: "酒店",
+              b0007: "商场",
+              b0008: "国际酒店",
+              bankrupt: "破产",
+              build: "建造",
+              buy: "购买",
+              buyLand: "购买",
+              dec: "降低",
+              defeat: "失败",
+              destory: "拆除",
+              diceWith: "掷出",
+              finish: "完成",
+              inc: "增高",
+              interestRate: "利率",
+              land: "土地",
+              money: "金钱",
+              moneyNotEnough: "金钱不足",
+              NY: "十里堤",
+              p0001: "王百万",
+              p0002: "鸠摩智",
+              p0003: "夫妻肺片",
+              p0004: "沈万三",
+              p0005: "胡雪岩",
+              p0006: "化腾为云",
+              player: "玩家",
+              repair: "修复",
+              select: "选择",
+              sell: "出售",
+              undersell: "抛售",
+              tax: "税收",
+              taxRate: "税率",
+              inflation: "通胀",
+              turnTo: "轮至",
+              upgrade: "升级",
+              win: "胜利",
+            },
+          },
+          units: {
+            p0001: {
+              avatar: "🧘‍♂️",
+            },
+            p0002: {
+              avatar: "🏋️‍♀️",
+            },
+            p0003: {
+              avatar: "🤼‍♀️",
+            },
+            p0004: {
+              avatar: "🤹",
+            },
+            p0005: {
+              avatar: "🏌️‍♂️",
+            },
+            p0006: {
+              avatar: "🏊",
+            },
+          },
+          groupCount: 4,
+          playerCount: 4,
+          maxStep: 6,
+          initMoneyPerLand: 100000,
+          initPublicMoneyPerLand: 100000,
+          publicReserveLandRate: 0.15,
+          initArgs: {
+            workerPrice: 10,
+            materielPrice: 10,
+            landPrice: 50000,
+            inflationRate: 0.01,
+            maxDepreciation: 0.3,
+            assetInjectionTimes: 10000,
+            underSellRate: 0.8,
+            systemConsumeDiscount: 0.5,
+            policies: {
+              taxRate: 0.2,
+              interestRate: 0.0001,
+              inflation: 1,
+            },
+          },
+          players: [
+            {
+              buildings: [
+                {
+                  building: "b0001",
+                },
+                {
+                  building: "b0002",
+                },
+              ],
+            },
+          ],
+        },
+        NY: {},
+        LOS: {
+          types: [
+            "22222222222",
+            "21111111112",
+            "21111111112",
+            "21111111112",
+            "21111111112",
+            "21111111112",
+            "21111111112",
+            "21111111112",
+            "21111111112",
+            "21111111112",
+            "22222222222",
+          ],
+          datas: [
+            "44444444444",
+            "40000000004",
+            "40000000004",
+            "40000000004",
+            "40000000004",
+            "40000000004",
+            "40000000004",
+            "40000000004",
+            "40000000004",
+            "40000000004",
+            "44444444444",
+          ],
+        },
+        AY: {
+          types: [
+            "22222222222",
+            "21111211112",
+            "21111211112",
+            "21111211112",
+            "22222211112",
+            "21111111112",
+            "21111222222",
+            "21111211111",
+            "21111211111",
+            "21111211111",
+            "22222211111",
+          ],
+          datas: [
+            "44444444444",
+            "40000400004",
+            "40000400004",
+            "40000400004",
+            "44444400004",
+            "40000000004",
+            "40000444444",
+            "40000400000",
+            "40000400000",
+            "40000400000",
+            "44444400000",
+          ],
+        },
+        Tian: {
+          types: [
+            "22222222222",
+            "21111211112",
+            "21111211112",
+            "21111211112",
+            "21111211112",
+            "22222222222",
+            "21111211112",
+            "21111211112",
+            "21111211112",
+            "21111211112",
+            "22222222222",
+          ],
+          datas: [
+            "44444444444",
+            "40000400004",
+            "40000400004",
+            "40000400004",
+            "40000400004",
+            "44444444444",
+            "40000400004",
+            "40000400004",
+            "40000400004",
+            "40000400004",
+            "44444444444",
+          ],
+        },
+        Qian: {
+          types: [
+            "22222222222",
+            "21111211112",
+            "21111211112",
+            "21122222112",
+            "21121112112",
+            "22221112222",
+            "21121112112",
+            "21122222112",
+            "21111211112",
+            "21111211112",
+            "22222222222",
+          ],
+          datas: [
+            "44444444444",
+            "40000400004",
+            "40000400004",
+            "40044444004",
+            "40040004004",
+            "44440004444",
+            "40040004004",
+            "40044444004",
+            "40000400004",
+            "40000400004",
+            "44444444444",
+          ],
+        },
+        Mian: {
+          types: [
+            "22222222222",
+            "21121212112",
+            "21121212112",
+            "22222222222",
+            "21121112112",
+            "22221112222",
+            "21121112112",
+            "22222222222",
+            "21121212112",
+            "21121212112",
+            "22222222222",
+          ],
+          datas: [
+            "44444444444",
+            "40040404004",
+            "40040404004",
+            "44444444444",
+            "40040004004",
+            "44440004444",
+            "40040004004",
+            "44444444444",
+            "40040404004",
+            "40040404004",
+            "44444444444",
+          ],
+        },
+        Jiong: {
+          types: [
+            "22222222222",
+            "21121112112",
+            "21121112112",
+            "22221112222",
+            "21111111112",
+            "21111111112",
+            "21111111112",
+            "22221112222",
+            "21121112112",
+            "21121112112",
+            "22222222222",
+          ],
+          datas: [
+            "44444444444",
+            "40040004004",
+            "40040004004",
+            "44440004444",
+            "40000000004",
+            "40000000004",
+            "40000000004",
+            "44440004444",
+            "40040004004",
+            "40040004004",
+            "44444444444",
+          ],
+        },
+        Shi: {
+          types: [
+            "11122222111",
+            "11121112111",
+            "11121112111",
+            "22221112222",
+            "21111111112",
+            "21111111112",
+            "21111111112",
+            "22221112222",
+            "11121112111",
+            "11121112111",
+            "11122222111",
+          ],
+          datas: [
+            "00044444000",
+            "00040004000",
+            "00040004000",
+            "44440004444",
+            "40000000004",
+            "40000000004",
+            "40000000004",
+            "44440004444",
+            "00040004000",
+            "00040004000",
+            "00044444000",
+          ],
+          start: {
+            x: 0,
+            y: 3,
+          },
+        },
+        SHI: {
+          types: [
+            "11122222111",
+            "11121112111",
+            "11121112111",
+            "22222222222",
+            "21121112112",
+            "21121112112",
+            "21121112112",
+            "22222222222",
+            "11121112111",
+            "11121112111",
+            "11122222111",
+          ],
+          datas: [
+            "00044444000",
+            "00040004000",
+            "00040004000",
+            "44440004444",
+            "40000000004",
+            "40000000004",
+            "40000000004",
+            "44440004444",
+            "00040004000",
+            "00040004000",
+            "00044444000",
+          ],
+          start: {
+            x: 0,
+            y: 3,
+          },
+        },
+        Latter: {
+          types: [
+            "22222222222",
+            "21212121212",
+            "22212121212",
+            "11212121212",
+            "11222121212",
+            "11112121212",
+            "11112221212",
+            "11111121212",
+            "11111122212",
+            "11111111212",
+            "11111111222",
+          ],
+        },
+        LATTER: {
+          types: [
+            "22222222222",
+            "21212121212",
+            "22222222222",
+            "11212121212",
+            "11222222222",
+            "11112121212",
+            "11112222222",
+            "11111121212",
+            "11111122222",
+            "11111111212",
+            "11111111222",
+          ],
+        },
+        Zero: {
+          types: [
+            "11112221111",
+            "11112121111",
+            "11112121111",
+            "11112121111",
+            "11112121111",
+            "11112121111",
+            "11112121111",
+            "11112121111",
+            "11112121111",
+            "11112121111",
+            "11112221111",
+          ],
+          start: {
+            x: 4,
+            y: 0,
+          },
+        },
+      },
+    };
+  </script>
+
+  <meta
+    name="viewport"
+    content="width=device-width, maximum-scale=1.0,user-scalable=no, initial-scale=1"
+  />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="transparent" />
+  <script>
+    const {
+      registerElement,
+      registerProperties,
+      evalInContext,
+      delayDispatcher,
+    } = (() => {
+      const evalInContext = (exp, context) => {
+        return function () {
+          with (this) {
+            try {
+              return eval(`(${exp})`);
+            } catch (e) {
+              console.log(exp);
+              console.log(e);
+              return;
+            }
+          }
+        }.call(context);
+      };
+
+      const removeItem = (item) => {
+        const clearItem = (/**@type {HTMLElement}*/ item) => {
+          for (let c of item.childNodes) {
+            clearItem(c);
+          }
+          let onRemoves = item.onRemoves;
+          item.onRemoves = undefined;
+          if (onRemoves?.length) {
+            onRemoves.forEach((onRemove) => onRemove());
+          }
+        };
+        clearItem(item);
+        item.remove();
+      };
+
+      const onprop = (parent, /**@type {String} */ exp, context, listener) => {
+        const tokens = exp.split(/\.|\?\.|\[|\]/);
+        if (!tokens[1]) {
+          if (context.tmpCtxName === tokens[0]) {
+          } else {
+            context.on && context.on(tokens[0], listener, true, parent);
+            parent.onRemoves = [
+              ...(parent.onRemoves || []),
+              () => {
+                context.off(tokens[0], listener, true);
+              },
+            ];
+          }
+          return;
+        }
+        if (context.tmpCtxName === tokens[0]) {
+          context = context[context.tmpCtxName];
+          tokens.shift();
+        }
+        const clearBind = (current) => {
+          while (current) {
+            if (current.off) {
+              current.off();
+            }
+            const next = current.next;
+            current.next = undefined;
+            current = next;
+          }
+        };
+        const register = (tokens, handler, context, offChain) => {
+          const prop = tokens[0];
+          if (!prop || !context) {
+            return;
+          }
+          offChain.next = {};
+          const registerNext = () => {
+            register(tokens.slice(1), handler, context[prop], offChain.next);
+          };
+          if (context.on && context.on instanceof Function) {
+            const listener = (...args) => {
+              clearBind(offChain.next);
+              offChain.next = {};
+              registerNext();
+              handler(...args);
+            };
+            context.on(prop, listener, true, parent);
+            offChain.off = () => {
+              context.off(prop, listener, true);
+            };
+          }
+          registerNext();
+        };
+        const offChain = {};
+        register(tokens, listener, context, offChain);
+        parent.onRemoves = [
+          ...(parent.onRemoves || []),
+          () => {
+            clearBind(offChain);
+          },
+        ];
+      };
+
+      const bindingForInstruction = (/**@type HTMLElement */ element) => {
+        let forExp = element.getAttribute("for.");
+        const match = forExp.match(
+          /^\s*(((let|const|of)\s+)?(\w+)\s+(of|in)\s+)?\s*(.+)\s*$/
+        );
+        if (!match || !match[6]) {
+          throw new Error("Invalid for Expression");
+        }
+        const collectionName = match[6];
+        const of_in = match[5] || "of";
+        let varName = match[4];
+        let forHead;
+        if (varName) {
+          forHead = `for(const ${varName} ${of_in} ${collectionName})`;
+        } else {
+          varName = "$$i";
+          forHead = `for(const ${varName} of ${collectionName})`;
+        }
+        const comment = document.createComment(element.outerHTML);
+        const parent = element.parentElement;
+        parent.insertBefore(comment, element);
+        element.remove();
+        /**@type Map<any, HTMLElement> */
+        let items = new Map();
+        /**@type Map<any, HTMLElement> */
+        let newItems = new Map();
+        let idx = 0;
+        let allRemoved = false;
+        const update = () => {
+          (function ($$forEach) {
+            newItems = new Map();
+            idx = 0;
+            allRemoved = false;
+            with (this) {
+              eval(`
+          let collection
+          try{
+            collection = this.${collectionName}
+          }
+          catch{
+            //ignore
+          }
+          if (collection) {
+            ${forHead}{
+              $$forEach(${varName})
+              }
+          }`);
+            }
+            for (const [_, { item }] of items) {
+              removeItem(item);
+            }
+            items = newItems;
+          }.call(element.context, ($$i) => {
+            /**@type HTMLElement */
+            let item;
+            if (items.has($$i)) {
+              const pair = items.get($$i);
+              item = pair.item;
+              if (!allRemoved && idx !== pair.idx) {
+                console.log("removed");
+                for (const [_, { item }] of items) {
+                  removeItem(item);
+                }
+                allRemoved = true;
+              }
+              items.delete($$i);
+            } else {
+              item = element.cloneNode(true);
+              item.removeAttribute("id");
+              item.removeAttribute("for.");
+              if (item.updateModel) {
+                item.model = $$i;
+              } else {
+                item.modelBeforeInit = $$i;
+              }
+              const context = Object.create(element.context);
+              context[varName] = $$i;
+              context.tmpCtxName = varName;
+              item.context = context;
+            }
+            parent.insertBefore(item, comment);
+            newItems.set($$i, { idx, item });
+            binding(item);
+            idx++;
+          }));
+        };
+        update();
+        let lastContext = element.context;
+        comment.updateWhenModelChange = () => {
+          if (lastContext === element.context) {
+            return;
+          }
+          lastContext = element.context;
+          update();
+        };
+        onprop(parent, collectionName, element.context, update);
+        return {};
+      };
+
+      const bindingIfInstruction = (
+        /**@type HTMLElement */ element,
+        keyChangeRemove
+      ) => {
+        let ifExp = element.getAttribute("if.");
+        const comment = document.createComment(element.outerHTML);
+        const parent = element.parentElement;
+        parent.insertBefore(comment, element);
+        element.remove();
+        let item;
+        let lastValue;
+        const update = () => {
+          const value = evalInContext(ifExp, element.context);
+          if (keyChangeRemove && value !== lastValue && item) {
+            removeItem(item);
+            item = undefined;
+          }
+          if (value) {
+            if (item) {
+              return;
+            }
+            item = element.cloneNode(true);
+            item.removeAttribute("if.");
+            item.removeAttribute("keyif.");
+            parent.insertBefore(item, comment);
+            item.context = element.context;
+            binding(item);
+          } else if (item) {
+            removeItem(item);
+            item = null;
+          }
+        };
+        update();
+        let lastContext = element.context;
+        comment.updateWhenModelChange = () => {
+          if (lastContext === element.context) {
+            return;
+          }
+          lastContext = element.context;
+          update();
+        };
+        for (const exp of getPropsFromExp(ifExp)) {
+          onprop(parent, exp, element.context, update);
+        }
+        return {};
+      };
+
+      const getPropNameFromBindingAttr = (attr) => {
+        return attr.replace(/-(\w)/g, (_, c) => c.toUpperCase());
+      };
+
+      const getPropsFromExp = (exp) => {
+        return exp.match(/([a-zA-Z0-9_$.\[\]]|\?\.)+/g) || [];
+        // return exp.match(/[a-zA-Z0-9_$.]+/g) || []
+      };
+
+      const bindingAttrs = (/**@type HTMLElement */ element) => {
+        if (element.hasAttribute("for.")) {
+          return bindingForInstruction(element);
+        }
+        if (element.hasAttribute("if.")) {
+          return bindingIfInstruction(element, element.hasAttribute("keyif."));
+        }
+        if (element.updateWhenModelChange) {
+          element.updateWhenModelChange();
+          return element;
+        }
+        const bindingAttrs = element
+          .getAttributeNames()
+          .filter((p) => p.endsWith("."));
+        for (const prop of bindingAttrs) {
+          const $$exp = element.getAttribute(prop);
+          const effectedAttr = prop
+            .slice(0, -".".length)
+            .split(",")
+            .map((a) => a.trim())
+            .filter((a) => a);
+
+          if (effectedAttr.some((a) => a.startsWith("on"))) {
+            const value = `(function($event){with(this){${$$exp}}}).call(event.target.context, event)`;
+            for (const ea of effectedAttr) {
+              if (ea.endsWith("$")) {
+                element.setAttribute(
+                  ea.slice(0, -1),
+                  "event.stopPropagation();" + value
+                );
+              } else {
+                element.setAttribute(ea, value);
+              }
+            }
+            continue;
+          }
+          const update = () => {
+            const value = evalInContext($$exp, element.context);
+            for (const ea of effectedAttr) {
+              if (ea === "model") {
+                if (element.updateModel) {
+                  element.updateModel(value);
+                } else {
+                  element.modelBeforeInit = value;
+                }
+                continue;
+              }
+              if (ea === "focus") {
+                if (value) {
+                  if (element.scrollIntoViewIfNeeded) {
+                    element.scrollIntoViewIfNeeded();
+                  } else {
+                    element.scrollIntoView();
+                  }
+                  element.focus();
+                }
+                continue;
+              }
+              if (ea === "scrollintoview") {
+                if (value) {
+                  if (element.scrollIntoViewIfNeeded) {
+                    element.scrollIntoViewIfNeeded();
+                  } else {
+                    element.scrollIntoView();
+                  }
+                }
+                continue;
+              }
+              if (ea.startsWith("class-")) {
+                const className = ea.slice("class-".length);
+                if (value) {
+                  element.classList.add(className);
+                } else {
+                  element.classList.remove(className);
+                }
+                continue;
+              } else if (ea.startsWith("style-")) {
+                const prop = ea.slice("style-".length, -1);
+                element.style.setProperty(prop, value);
+                continue;
+              }
+              if (ea.endsWith("$")) {
+                let prop = getPropNameFromBindingAttr(ea.slice(0, -1));
+                switch (prop) {
+                  case "innerHtml":
+                    prop = "innerHTML";
+                    break;
+                }
+                element[prop] = value;
+                continue;
+              }
+              if (value === undefined || value === null) {
+                element.removeAttribute(ea);
+              } else if (element[ea] !== value) {
+                element.setAttribute(ea, value);
+              }
+            }
+          };
+          update();
+          for (const exp of getPropsFromExp($$exp)) {
+            onprop(element.parentElement, exp, element.context, update);
+          }
+        }
+        return element;
+      };
+
+      const binding = (/**@type HTMLElement */ element) => {
+        /**@type { Object.<string,HTMLElement> } */
+        const components = element.context.components;
+        if (element.hasAttribute) {
+          const handler = bindingAttrs(element);
+          //collect ids
+          if (element.hasAttribute("id")) {
+            components[element.getAttribute("id")] = handler;
+          }
+          if (handler !== element) {
+            return;
+          }
+        }
+        for (const child of [...element.children]) {
+          if (
+            child.context == element.context ||
+            (child.context &&
+              Object.getPrototypeOf(child.context) === element.context)
+          ) {
+          } else {
+            child.context = element.context;
+          }
+          binding(child);
+        }
+      };
+
+      const getNameFromTagName = (tagName) => {
+        return tagName.replace(/(?:^|-)(\w)/g, (_, c) => c.toUpperCase());
+      };
+
+      class DelayDispatcher {
+        constructor(delay = 50) {
+          this.delay = delay;
+          this.currentTask;
+          this.running = false;
+          this.lastDispatchTime = 0;
+          this.groups = new Map();
+          this.count = 0;
+          // this.delayListeners = new Map()
+        }
+
+        set(obj, key, method) {
+          let group = this.groups.get(obj);
+          if (!group) {
+            group = {};
+            this.groups.set(obj, group);
+          }
+          group[key] = method;
+        }
+
+        async start() {
+          if (this.running) {
+            return;
+          }
+          this.running = true;
+          this.currentTask = new Promise(async (resolve) => {
+            while (this.running) {
+              let now = Date.now();
+              let remain = this.delay - (now - this.lastDispatchTime);
+              if (remain > 0) {
+                await new Promise((r) => setTimeout(r, remain));
+              }
+              let groups = this.groups;
+              await new Promise((resolve) =>
+                window.requestAnimationFrame(async () => {
+                  this.groups = new Map();
+                  for (let [obj, group] of groups) {
+                    if (!obj || !group) {
+                      continue;
+                    }
+                    for (let p in group) {
+                      try {
+                        group[p]?.();
+                      } catch (e) {
+                        console.log(e);
+                      }
+                    }
+                  }
+                  resolve();
+                })
+              );
+            }
+            this.lastDispatchTime = Date.now();
+            this.currentTask = undefined;
+            this.running = false;
+            resolve();
+          });
+          await this.currentTask;
+        }
+
+        async stop() {
+          this.running = false;
+          await this.currentTask;
+        }
+
+        setDelay(delay) {
+          this.delay = delay;
+        }
+      }
+
+      const delayDispatcher = new DelayDispatcher();
+
+      const registerProperties = (obj, ...props) => {
+        const backup = {};
+        if (!obj.define) {
+          addPropChange(obj);
+        }
+        props.forEach((prop) => {
+          const desc = Object.getOwnPropertyDescriptor(obj, prop);
+          if (desc && !desc.configurable) {
+            delete backup[prop];
+            return;
+          }
+          let propValue;
+          let [propName, handler] =
+            prop instanceof Array ? prop : [prop, undefined];
+          if (obj[propName] !== undefined) {
+            backup[propName] = obj[propName];
+          }
+          Object.defineProperty(obj, propName, {
+            get() {
+              return propValue;
+            },
+            set(newValue) {
+              if (propValue === newValue) {
+                return;
+              }
+              const oldValue = propValue;
+              propValue = newValue;
+              obj.raise(propName, newValue, oldValue);
+              handler?.(newValue, oldValue);
+              delayDispatcher.set(obj, propName, () => {
+                obj.raise(propName, newValue, oldValue, true);
+              });
+            },
+          });
+        });
+        Object.assign(obj, backup);
+        return obj;
+      };
+
+      const registerAllProperties = (obj) => {
+        return registerProperties(obj, ...Object.keys(obj));
+      };
+
+      Object.defineProperty(Object.prototype, "registerProperties", {
+        value: function (...props) {
+          return registerProperties(this, ...props);
+        },
+      });
+
+      Object.defineProperty(Object.prototype, "registerAllProperties", {
+        value: function () {
+          return registerAllProperties(this);
+        },
+      });
+
+      delayDispatcher;
+
+      const addPropChange = (/**@type { Object } */ obj) => {
+        /**@type Map<string, Set<{(newValue, oldValue):any}>> */
+        const atonceListeners = new Map();
+        const delayListeners = new Map();
+        const thisProp = "this";
+        Object.defineProperty(obj, thisProp, {
+          get() {
+            return obj;
+          },
+        });
+        Object.defineProperty(obj, "define", {
+          value: (...props) => registerProperties(obj, ...props),
+        });
+        Object.defineProperty(obj, "on", {
+          value: (
+            /**@type string */ prop,
+            listener,
+            delay = false,
+            additional
+          ) => {
+            let l = delay ? delayListeners : atonceListeners;
+            if (!l.has(prop)) {
+              l.set(prop, new Map());
+            }
+            l.get(prop).set(listener, additional);
+            if (delay && delayDispatcher?.delayListeners) {
+              delayDispatcher.delayListeners.set(listener, additional);
+            }
+            delayDispatcher.count++;
+          },
+        });
+
+        Object.defineProperty(obj, "off", {
+          value: (prop, listener, delay = false) => {
+            let l = delay ? delayListeners : atonceListeners;
+            if (!l.has(prop)) {
+              return;
+            }
+            l.get(prop).delete(listener);
+            if (delay && delayDispatcher?.delayListeners) {
+              delayDispatcher.delayListeners.delete(listener);
+            }
+            delayDispatcher.count--;
+          },
+        });
+
+        Object.defineProperty(obj, "clearOn", {
+          value: (delay) => {
+            let l = delay ? delayListeners : atonceListeners;
+            delayDispatcher.count -= l.size;
+            if (delay && delayDispatcher?.delayListeners) {
+              l.forEach((_, listener) => {
+                delayDispatcher.delayListeners.delete(listener);
+              });
+            }
+            l.clear();
+            // for (let p in obj) {
+            //   obj[p].clearOn?.(delay)
+            // }
+          },
+        });
+        Object.defineProperty(obj, "dispose", {
+          value: () => {
+            obj.clearOn(false);
+            obj.clearOn(true);
+          },
+        });
+        Object.defineProperty(obj, "hasOn", {
+          value: (prop, delay = false) => {
+            let l = delay ? delayListeners : atonceListeners;
+            return l.has(prop);
+          },
+        });
+
+        Object.defineProperty(obj, "raise", {
+          value: (prop, newValue, oldValue, delay = false) => {
+            if (prop !== thisProp) {
+              obj.raise(thisProp, obj, obj, delay);
+            }
+            let l = delay ? delayListeners : atonceListeners;
+            if (!l.has(prop)) {
+              return;
+            }
+            for (const [listener, _] of l.get(prop)) {
+              listener(newValue, oldValue);
+            }
+          },
+        });
+      };
+
+      const registerElement = (tagName, /**@type { string } */ constructor) => {
+        const elementClassName = `HTML${
+          constructor || getNameFromTagName(tagName)
+        }Element`;
+        constructor = constructor || "Object";
+        eval(`
+    class ${elementClassName} extends HTMLElement{
+      constructor(){
+        super()
+        const shadow = this.attachShadow({mode:'open'})
+        const template = document.getElementById('${tagName}')
+        if(!template || template.tagName !== 'TEMPLATE' ){
+          throw new Error('Define Template')
+        }
+        this.template_ = template
+        this.shadow_ = shadow
+        this.model_ = new ${constructor}()
+        this.model_.components = { host: this.shadow_ }
+        if(this.context && this.hasAttribute('model.')){
+          const modeExp = this.getAttribute('model.')
+          this.model = evalInContext(modeExp, this.context)
+        }else if(this.modelBeforeInit){
+          this.model = this.modelBeforeInit
+        }else{
+          this.model =  {}
+        }
+      }
+
+      rebuildView(){
+        this.shadow_.innerHTML = ''
+        const instance = document.importNode(this.template_.content, true)
+        this.shadow_.appendChild(instance)
+      }
+  
+      get model(){
+        return this.model_
+      }
+  
+      set model(value){
+        if(value?.on){
+          this.model_ = value || {}
+          this.model_.components = { host: this.shadow_ , ...this.model_.components||{}}
+        }else{
+          //combine code behind with model
+          Object.assign(this.model_, value)
+        }
+        this.shadow_.context = this.model_ 
+        this.rebuildView()
+      }
+  
+      updateModel(value){
+        this.model = value
+        this.connectedCallback()
+      }
+      
+      connectedCallback(){
+        binding(this.shadow_)
+        if(this.model_.launch){
+          this.model_.launch()
+        } 
+      }
+    }
+    customElements.define('${tagName}', ${elementClassName})
+    `);
+      };
+      return {
+        registerElement,
+        registerProperties,
+        evalInContext,
+        delayDispatcher,
+      };
+    })();
+
+    const sleep = (timeout) =>
+      new Promise((resolve) => setTimeout(resolve, timeout));
+
+    class AppBase {
+      async launch() {
+        if (this.launched) {
+          return;
+        }
+        this.launched = true;
+        this.storage = this.initStorage_();
+        this.data = await this.initData(window.appData);
+        window.app = this;
+        await this.start();
+      }
+
+      async registerStorageProperties(...props) {
+        if (!this.storage) {
+          return;
+        }
+        let asyncTimeout = 50;
+        const bgTimeout = 200;
+        for (const [prop, defaultValue, onchange] of props) {
+          let propValue;
+          let valueModified = false;
+          let successLoadFromStorage = false;
+          let loadFunc;
+          let bgLoad = false;
+          const mergeValue = (savedValue) => {
+            if (successLoadFromStorage) {
+              return;
+            }
+            successLoadFromStorage = true;
+            if (!valueModified) {
+              valueModified = true;
+              propValue = savedValue;
+            } else {
+              // merge strategy
+              propValue = savedValue;
+            }
+            if (bgLoad && onchange) {
+              onchange();
+            }
+          };
+          loadFunc = async () => {
+            const jsonStr = await this.storage.getItem(prop);
+            let savedValue;
+            if (!jsonStr) {
+              savedValue = defaultValue;
+            } else {
+              try {
+                savedValue = JSON.parse(jsonStr);
+              } catch {
+                savedValue = defaultValue;
+              }
+            }
+            mergeValue(savedValue);
+          };
+          const tryLoad = async () => {
+            bgLoad = true;
+            const func = loadFunc;
+            loadFunc = null;
+            await Promise.race([
+              func(),
+              sleep(bgTimeout).then(() => {
+                if (!successLoadFromStorage) {
+                  loadFunc = func;
+                }
+              }),
+            ]);
+          };
+          await Promise.race([
+            loadFunc(),
+            sleep(asyncTimeout).then(() => {
+              if (!valueModified) {
+                propValue = defaultValue;
+                valueModified = true;
+                asyncTimeout = 0;
+              }
+            }),
+          ]);
+          Object.defineProperty(this, prop, {
+            get() {
+              if (loadFunc) {
+                tryLoad();
+              }
+              return propValue;
+            },
+            set(newValue) {
+              propValue = newValue;
+              if (successLoadFromStorage) {
+                this.storage.setItem(prop, JSON.stringify(propValue));
+              }
+            },
+          });
+        }
+      }
+
+      initStorage_() {
+        if (window.$localStorage) {
+          return window.$localStorage;
+        }
+        try {
+          const s = window.localStorage;
+          return s;
+        } catch {
+          return {
+            getItem: () => "",
+            setItem: () => true,
+          };
+        }
+      }
+
+      async initData(data) {
+        return data;
+      }
+
+      async start() {
+        console.log("start");
+      }
+
+      async pause() {
+        console.log("pause");
+      }
+
+      async resume() {
+        console.log("pause");
+      }
+
+      async stop() {
+        console.log("stop");
+      }
+    }
+
+    window.onload = async () => {
+      let currentClass = App;
+      while (true) {
+        let baseClass = Object.getPrototypeOf(currentClass);
+        if (
+          !baseClass ||
+          Object.getPrototypeOf(Object) === Object.getPrototypeOf(currentClass)
+        ) {
+          break;
+        }
+        currentClass = baseClass;
+      }
+      Object.setPrototypeOf(currentClass.prototype, AppBase.prototype);
+      for (const template of document.querySelectorAll(
+        "template[id][view-model]"
+      )) {
+        const tagName = template.getAttribute("id");
+        if (!tagName) {
+          continue;
+        }
+        const codeBehind = template.getAttribute("view-model");
+        registerElement(tagName, codeBehind);
+      }
+      delayDispatcher.start();
+    };
+  </script>
+
+  <style>
+    html,
+    body {
+      height: 100%;
+      margin: 0;
+    }
+  </style>
+
+  <body>
+    <app-main></app-main>
+
+    <template id="h-stack" view-model>
+      <slot></slot>
+      <style>
+        :host {
+          display: flex;
+          flex-direction: row;
+        }
+      </style>
+    </template>
+    <template id="v-stack" view-model>
+      <slot></slot>
+      <style>
+        :host {
+          display: flex;
+          flex-direction: column;
+        }
+      </style>
+    </template>
+    <template id="hv-stack" view-model>
+      <slot></slot>
+      <style>
+        :host {
+          display: flex;
+          flex-direction: column;
+        }
+
+        @media (orientation: landscape) {
+          :host {
+            flex-direction: row;
+          }
+        }
+      </style>
+    </template>
+
+    <template id="vh-stack" view-model>
+      <slot></slot>
+      <style>
+        :host {
+          display: flex;
+          flex-direction: row;
+        }
+
+        @media (orientation: landscape) {
+          :host {
+            flex-direction: column;
+          }
+        }
+      </style>
+    </template>
+
+    <template id="h-square" view-model>
+      <slot></slot>
+      <style>
+        :host {
+          width: 100vw;
+          height: 100vw;
+        }
+
+        @media (orientation: landscape) {
+          :host {
+            width: 100vh;
+            height: 100vh;
+          }
+        }
+      </style>
+    </template>
+
+    <template id="h-spacer" view-model>
+      <slot></slot>
+      <style>
+        :host {
+          flex: 1;
+          display: flex;
+        }
+      </style>
+    </template>
+
+    <template id="h-text" view-model>
+      <span inner-text$.="content"></span>
+      <style>
+        :host {
+          flex: 1;
+          display: flex;
+          align-items: center;
+          place-content: center;
+        }
+      </style>
+    </template>
+
+    <template id="play-button" view-model>
+      <span id="btnPlay" class="play-button" class-pause.="isPlaying"></span>
+      <style>
+        :host {
+          display: block;
+          border-radius: 5px;
+          padding: 3px 10px;
+          background-color: #fff4;
+        }
+
+        .play-button {
+          display: block;
+          width: 100%;
+          height: 100%;
+          background-color: var(--color);
+          clip-path: polygon(25% 10%, 25% 90%, 95% 50%, 25% 10%);
+          transition: 200ms all ease-in-out;
+        }
+
+        .play-button.pause {
+          clip-path: polygon(
+            60% 50%,
+            20% 20%,
+            20% 80%,
+            60% 50%,
+            60% 80%,
+            80% 80%,
+            80% 20%,
+            60% 20%
+          );
+        }
+      </style>
+    </template>
+
+    <template id="menu-bar" view-model>
+      <h-stack>
+        <div class-hidden.="!item.show" class="menu-item" for.="item of menus">
+          <span inner-text$.="item.name" onclick.="item.onclick()"></span>
+        </div>
+      </h-stack>
+      <style>
+        :host {
+          display: block;
+        }
+
+        h-stack {
+          overflow: hidden;
+        }
+
+        .menu-item {
+          margin: 5px;
+          background-color: var(--menu-background-color);
+          border-radius: 4px;
+          padding: 2px 5px;
+          color: var(--menu-color);
+          display: flex;
+          justify-content: center;
+          flex: 1;
+        }
+
+        .menu-item > span {
+          display: block;
+          text-overflow: ellipsis;
+          white-space: pre;
+          overflow: hidden;
+          max-width: 6em;
+        }
+
+        .hidden {
+          display: none;
+        }
+      </style>
+    </template>
+
+    <script>
+      class MenuItem {
+        constructor(name = "", onclick = null, show = true) {
+          registerProperties(this, "name", "show");
+          this.name = name;
+          this.show = show;
+          this.onclick = onclick;
+        }
+      }
+    </script>
+
+    <template id="modal-panel" view-model="Modal">
+      <div>
+        <span
+          class="toastMessage"
+          if.="toastMessage"
+          inner-text$.="toastMessage"
+        ></span>
+        <div if.="open" class="modal-wraper" onclick.="close()">
+          <div class="modal" onclick="event.stopPropagation()">
+            <div class="title">
+              <span inner-text$.="title"></span>
+            </div>
+            <div class="body">
+              <div if.="items?.length">
+                <div
+                  class="item"
+                  for.="item of items"
+                  class-highlight.="item === selectedItem"
+                  onclick.="close(item)"
+                >
+                  <span
+                    inner-text$.="options.itemName?item[options.itemName]:item"
+                  ></span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <style>
+        .hidden {
+          /* left: -100%; */
+          /* transition: ease-in-out 0.05s left; */
+          display: none;
+        }
+
+        .toastMessage {
+          color: var(--toast-color, #eee);
+          background-color: var(--toast-background-color, #0008);
+          position: fixed;
+          bottom: 0;
+          margin: 20px auto;
+          left: 50%;
+          transform: translate(-50%, 0);
+          padding: 5px 20px;
+          border-radius: 4px;
+          text-align: center;
+          backdrop-filter: blur(5px);
+        }
+
+        .modal-wraper {
+          position: absolute;
+          top: 0;
+          left: 0;
+          width: 100%;
+          height: 100%;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+        }
+
+        .modal {
+          background: #fff;
+          border-radius: 10px;
+          padding: 10px;
+          width: 90%;
+          max-height: 90%;
+          box-shadow: 3px 3px 5px;
+        }
+
+        .modal .title {
+          font-size: large;
+          margin: 5px 0;
+          font-weight: bold;
+        }
+
+        .modal .body {
+          margin: 5px 0;
+        }
+
+        .modal .foot {
+          margin: 5px 0;
+        }
+
+        .item {
+          margin: 8px 0;
+          background: #0002;
+          padding: 5px;
+          border-radius: 8px;
+        }
+
+        .item.highlight {
+          background: #0008;
+          color: white;
+        }
+      </style>
+    </template>
+    <script>
+      class Modal {
+        constructor() {
+          /**@type { Object.<string,HTMLElement> } */
+          this.components;
+          /**@type { Storage | {  } } */
+          this.storage;
+          registerProperties(
+            this,
+            "toastMessage",
+            "title",
+            "items",
+            "selectedItem",
+            "open",
+            "options"
+          );
+        }
+        toast(/**@string */ msg, /**@type number */ timeout = 1000, task) {
+          return new Promise(async (resolve) => {
+            this.toastMessage = msg;
+            await task;
+            setTimeout(() => {
+              this.toastMessage = null;
+              resolve();
+            }, timeout);
+          });
+        }
+
+        close(result) {
+          if (!this.resolveTask) {
+            return;
+          }
+          if (this.options.requilred && !result) {
+            return;
+          }
+          this.open = undefined;
+          this.resolveTask.resolve(result);
+        }
+
+        select(
+          /** @type string */ msg,
+          /** @type [any] */ values = [],
+          defaultIdx = 0,
+          opt = undefined
+        ) {
+          if (this.resolveTask) {
+            const { resolve, reject } = this.resolveTask;
+            this.resolveTask = undefined;
+            reject();
+          }
+          this.title = msg;
+          this.items = values;
+          this.selectedItem = values[defaultIdx];
+          this.options = opt || {};
+          this.open = true;
+          return new Promise(
+            (resolve, reject) => (this.resolveTask = { resolve, reject })
+          );
+        }
+      }
+    </script>
+    <template id="pop-up" view-model="Popup">
+      <div class="popup">
+        <slot></slot>
+      </div>
+      <style>
+        :host {
+          display: block;
+          position: relative;
+          left: 0;
+          top: 0;
+          bottom: 0;
+          right: 0;
+          position: fixed;
+          background: #0008;
+          backdrop-filter: blur(5px);
+        }
+
+        .popup {
+          max-width: 99%;
+          max-height: 99%;
+          position: absolute;
+          top: 50%;
+          left: 50%;
+          transform: translate(-50%, -50%);
+        }
+      </style>
+    </template>
+    <script>
+      class Popup {}
+    </script>
+  </body>
+</html>

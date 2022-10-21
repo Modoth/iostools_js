@@ -1,0 +1,3012 @@
+<html>
+  <meta charset="utf-8" />
+
+  <script>
+    const ClockStatus = {
+      Stop: 0,
+      Runing: 1,
+      Pause: 2,
+    };
+
+    class Clock {
+      constructor(tps = 1, timeScale = 1) {
+        this.now_ = -1;
+        this.interval_ = 0;
+        this.timeScale = 1;
+        this.tps_ = Math.min(1000, tps);
+      }
+
+      get now() {
+        return this.now_;
+      }
+
+      onTick_() {
+        this.tick_++;
+        const now = Date.now();
+        this.now_ = now - this.start_;
+        this.tickTime_ += ((now - this.lastTickTime_) * this.timeScale) / 1000;
+        this.lastTickTime_ = now;
+        let task = this.tasks_[0];
+        while (task && task.raiseTick <= this.tick_) {
+          task.resolve();
+          this.tasks_.shift();
+          task = this.tasks_[0];
+        }
+      }
+
+      start() {
+        this.tick_ = 0;
+        this.now_ = 0;
+        this.tickTime_ = 0;
+        this.start_ = Date.now();
+        this.tasks_ = [];
+        this.resume();
+      }
+
+      pause() {
+        clearInterval(this.interval_);
+        this.status = ClockStatus.Stop;
+      }
+
+      startOrResume() {
+        if (this.tasks_) {
+          this.resume();
+        } else {
+          this.start();
+        }
+      }
+
+      resume() {
+        this.interval_ = setInterval(this.onTick_.bind(this), 1000 / this.tps_);
+        this.lastTickTime_ = Date.now();
+        this.status = ClockStatus.Runing;
+      }
+
+      stop() {
+        this.pause();
+        this.status = ClockStatus.Stop;
+      }
+
+      get tick() {
+        return this.tick_;
+      }
+
+      get tickTime() {
+        return this.tickTime_;
+      }
+
+      get tps() {
+        return this.tps_;
+      }
+
+      wait(tick = 0) {
+        return new Promise((resolve) => {
+          const raiseTick = this.tick_ + tick;
+          const newTask = { raiseTick, resolve };
+          const beforeIdx = this.tasks_.findIndex(
+            (t) => t.raiseTick > raiseTick
+          );
+          if (beforeIdx === -1) {
+            this.tasks_.push(newTask);
+          } else {
+            this.tasks_.splice(beforeIdx - 1, 0, newTask);
+          }
+        });
+      }
+    }
+
+    class ControllerBase {
+      initPos() {
+        const t = this.api.player.teem;
+        const field = this.api.field;
+        const p = this.api.player;
+        let membersCount = t.members.length - 1;
+        let offsetY = (t.homeField ? 1 : -1) * 1;
+        const offsetX = (p.id - (membersCount - 1) / 2) * 1;
+        return new Point(offsetX + field.width / 2, offsetY + field.height / 2);
+      }
+    }
+
+    class SimplePlayer extends ControllerBase {
+      update() {
+        const position = this.api.player.position;
+        const ballPosition = this.api.ball.position;
+        if (this.api.canKick()) {
+          const dy = 1;
+          const ballTarget = new Point(
+            this.api.field.width / 2,
+            this.api.player.teem.homeField ? 0 - dy : this.api.field.height + dy
+          );
+          this.api.kickTo(ballTarget);
+        }
+        if (
+          this.state.target &&
+          this.state.target.dist(position) > Number.EPSILON
+        ) {
+          return;
+        }
+        const target = new Point(
+          position.x + (ballPosition.x - position.x),
+          position.y + (ballPosition.y - position.y)
+        );
+        if (this.api.runTo(target)) {
+          this.state.target = target;
+        }
+      }
+    }
+
+    class FoolPlayer extends ControllerBase {
+      initPos() {
+        this.state.target = undefined;
+        return super.initPos();
+      }
+      update() {
+        const position = this.api.player.position;
+        if (
+          this.state.target &&
+          this.state.target.dist(position) > Number.EPSILON
+        ) {
+          return;
+        }
+        const maxLength = 5;
+        const target = new Point(
+          position.x + (Math.random() - 0.5) * maxLength,
+          position.y + (Math.random() - 0.5) * maxLength
+        );
+        if (this.api.runTo(target)) {
+          this.state.target = target;
+        }
+      }
+    }
+
+    class SimpleGoalKeeper extends ControllerBase {
+      initPos() {
+        const t = this.api.player.teem;
+        const field = this.api.field;
+        this.state.initPos = new Point(
+          field.width / 2,
+          t.homeField ? field.height : 0
+        );
+        this.state.targetPos = new Point(
+          field.width / 2,
+          !t.homeField ? field.height : 0
+        );
+        return this.state.initPos;
+      }
+      update() {
+        const position = this.api.player.position;
+        const ballPosition = this.api.ball.position;
+        if (this.api.canCarry() && this.api.carry()) {
+          this.state.carried = true;
+        }
+        if (
+          this.state.target &&
+          this.state.target.dist(position) > Number.EPSILON
+        ) {
+          return;
+        }
+        if (this.state.carried) {
+          if (this.api.runTo(this.state.initPos)) {
+            this.state.target = this.state.initPos;
+          }
+          if (
+            this.state.target &&
+            this.state.target.dist(position) > Number.EPSILON
+          ) {
+            return;
+          }
+          if (this.api.kickTo(this.state.targetPos)) {
+            this.state.carried = undefined;
+          }
+          return;
+        }
+        const target = ballPosition;
+        new Point(position.x + (ballPosition.x - position.x), position.y);
+        if (this.api.runTo(target)) {
+          this.state.target = target;
+        }
+      }
+    }
+
+    class GameCanvasBase {
+      constructor(/**@type {HTMLCanvasElement}*/ canvas, getObjects, camera) {
+        registerProperties(this, "ppm");
+        this.camera = camera;
+        this.canvas = canvas;
+        this.getObjects = getObjects;
+        this.pixelRatio = window.devicePixelRatio;
+        const style = window.getComputedStyle(canvas);
+        canvas.width = parseFloat(style.width) * this.pixelRatio;
+        canvas.height = parseFloat(style.height) * this.pixelRatio;
+        this.cameraUpdated = true;
+      }
+
+      init({ field, ppm }) {
+        this.ppm = ppm * this.pixelRatio;
+        this.field = field;
+        this.camera = this.camera || new CameraObject();
+        Object.assign(this.camera, {
+          width: this.canvas.width / this.ppm,
+          height: this.canvas.height / this.ppm,
+          position: new Point(this.field.width / 2, this.field.height / 2),
+        });
+      }
+
+      drawFrame() {
+        if (!this.cameraUpdated && !this.getObjects) {
+          return;
+        }
+        this.cameraUpdated = undefined;
+        const ctx = this.canvas.getContext("2d");
+        ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+        if (!this.getObjects) {
+          this.drawField(ctx);
+        } else {
+          for (let obj of this.getObjects()) {
+            this.drawObject(ctx, obj);
+          }
+        }
+      }
+
+      drawObject(/**@type {CanvasRenderingContext2D}*/ ctx, obj) {
+        if (!obj.position || !obj.avatar || obj.hidden) {
+          return;
+        }
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        const drawObject = (obj) => {
+          let {
+            position: { x, y },
+            avatar,
+            size,
+          } = obj;
+          [x, y] = this.gameToCanvasPos([x, y]);
+          size = this.gameToCanvasLength(size);
+          const halfSize = size / 2;
+          if (
+            x < -halfSize ||
+            y < -halfSize ||
+            x > this.canvas.width + halfSize ||
+            y > this.canvas.height + halfSize
+          ) {
+            return;
+          }
+          if (this.field.useAvatar) {
+            let fontSize = 32;
+            ctx.font = `${fontSize.toFixed(0)}px Arial`;
+            const metrics = ctx.measureText(avatar);
+            fontSize *= size / metrics.width;
+            ctx.font = `${fontSize.toFixed(0)}px Arial`;
+            ctx.fillText(avatar, x, y);
+          } else {
+            ctx.beginPath();
+            ctx.arc(x, y, size / 2, 0, Math.PI * 2, true);
+            ctx.closePath();
+            ctx.fillStyle = obj.color?.bg || "#000";
+            ctx.fill();
+          }
+
+          for (let c of obj.children || []) {
+            if (c.avatar && c.position) {
+              drawObject(c, obj.position.x, obj.position.y);
+            }
+          }
+        };
+        drawObject(obj);
+      }
+
+      drawGround(ctx) {
+        let {
+          width,
+          height,
+          bandsCount,
+          groundColor,
+          grassColor,
+          lightGrassColor,
+          lineColor,
+          lineWidth,
+          centerR,
+          cornerR,
+          doorWidth,
+          doorHeight,
+          inBoxR,
+          outBoxR,
+          rOffset,
+        } = this.field;
+        ctx.fillStyle = groundColor;
+        ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+        bandsCount = bandsCount || 1;
+        const bandHeight = height / bandsCount;
+        const bandPx = this.gameToCanvasLength(bandHeight);
+        for (let i = 0; i < bandsCount; i++) {
+          ctx.fillStyle = i % 2 === 0 ? grassColor : lightGrassColor;
+          const y = this.gameToCanvasPos([0, bandHeight * i])[1];
+          if (y > this.canvas.height || y + bandPx < 0) {
+            continue;
+          }
+          ctx.fillRect(0, y, this.canvas.width, bandPx);
+        }
+      }
+
+      drawField(ctx) {
+        const {
+          width,
+          height,
+          grassColor,
+          lineColor,
+          lineWidth,
+          centerR,
+          cornerR,
+          doorWidth,
+          doorHeight,
+          inBoxR,
+          outBoxR,
+          rOffset,
+        } = this.field;
+
+        this.drawGround(ctx);
+
+        ctx.beginPath();
+
+        ctx.strokeStyle = lineColor;
+        ctx.lineWidth = this.gameToCanvasLength(lineWidth);
+
+        ctx.gMoveTo = (x, y) => {
+          ctx.moveTo(...this.gameToCanvasPos([x, y]));
+        };
+        ctx.gLineTo = (x, y) => {
+          ctx.lineTo(...this.gameToCanvasPos([x, y]));
+        };
+        ctx.gArcTo = (x1, y1, x2, y2, r) => {
+          ctx.arcTo(
+            ...this.gameToCanvasPos([x1, y1]),
+            ...this.gameToCanvasPos([x2, y2]),
+            this.gameToCanvasLength(r)
+          );
+        };
+        ctx.gArc = (
+          x,
+          y,
+          radius,
+          startAngle,
+          endAngle,
+          counterclockwise = undefined
+        ) => {
+          ctx.arc(
+            ...this.gameToCanvasPos([x, y]),
+            this.gameToCanvasLength(radius),
+            startAngle,
+            endAngle,
+            counterclockwise
+          );
+        };
+        ctx.gMoveTo(0, 0);
+        ctx.gLineTo(width, 0);
+        ctx.gLineTo(width, height);
+        ctx.gLineTo(0, height);
+        ctx.gLineTo(0, 0);
+
+        ctx.gMoveTo(0, height / 2);
+        ctx.gLineTo(width, height / 2);
+        ctx.gMoveTo(width / 2 + centerR, height / 2);
+        ctx.gArc(width / 2, height / 2, centerR, 0, Math.PI * 2);
+
+        ctx.gMoveTo(0 + cornerR, 0);
+        ctx.gArc(0, 0, cornerR, 0, Math.PI / 2);
+        ctx.gMoveTo(width, 0 + cornerR);
+        ctx.gArc(width, 0, cornerR, Math.PI / 2, Math.PI);
+        ctx.gMoveTo(width - cornerR, height);
+        ctx.gArc(width, height, cornerR, Math.PI, (Math.PI * 3) / 2);
+        ctx.gMoveTo(0, height - cornerR);
+        ctx.gArc(0, height, cornerR, (Math.PI * 3) / 2, Math.PI * 2);
+
+        ctx.gMoveTo(width / 2 - (outBoxR + doorWidth / 2), 0);
+        ctx.gLineTo(width / 2 - (outBoxR + doorWidth / 2), outBoxR);
+        ctx.gLineTo(width / 2 + (outBoxR + doorWidth / 2), outBoxR);
+        ctx.gLineTo(width / 2 + (outBoxR + doorWidth / 2), 0);
+
+        ctx.gMoveTo(width / 2 - (outBoxR + doorWidth / 2), height);
+        ctx.gLineTo(width / 2 - (outBoxR + doorWidth / 2), height - outBoxR);
+        ctx.gLineTo(width / 2 + (outBoxR + doorWidth / 2), height - outBoxR);
+        ctx.gLineTo(width / 2 + (outBoxR + doorWidth / 2), height);
+
+        ctx.gMoveTo(width / 2 - (inBoxR + doorWidth / 2), 0);
+        ctx.gLineTo(width / 2 - (inBoxR + doorWidth / 2), inBoxR);
+        ctx.gLineTo(width / 2 + (inBoxR + doorWidth / 2), inBoxR);
+        ctx.gLineTo(width / 2 + (inBoxR + doorWidth / 2), 0);
+
+        ctx.gMoveTo(width / 2 - (inBoxR + doorWidth / 2), height);
+        ctx.gLineTo(width / 2 - (inBoxR + doorWidth / 2), height - inBoxR);
+        ctx.gLineTo(width / 2 + (inBoxR + doorWidth / 2), height - inBoxR);
+        ctx.gLineTo(width / 2 + (inBoxR + doorWidth / 2), height);
+
+        ctx.gMoveTo(width / 2 - doorWidth / 2, 0);
+        ctx.gLineTo(width / 2 - doorWidth / 2, -doorHeight);
+        ctx.gLineTo(width / 2 + doorWidth / 2, -doorHeight);
+        ctx.gLineTo(width / 2 + doorWidth / 2, 0);
+
+        ctx.gMoveTo(width / 2 - doorWidth / 2, height);
+        ctx.gLineTo(width / 2 - doorWidth / 2, height + doorHeight);
+        ctx.gLineTo(width / 2 + doorWidth / 2, height + doorHeight);
+        ctx.gLineTo(width / 2 + doorWidth / 2, height);
+
+        const ang = Math.asin((outBoxR - rOffset) / centerR);
+        const dx = Math.cos(ang) * centerR;
+
+        ctx.gMoveTo(width / 2 + dx, outBoxR);
+        ctx.gArc(width / 2, rOffset, centerR, ang, Math.PI - ang);
+
+        ctx.gMoveTo(width / 2 + dx, height - outBoxR);
+        ctx.gArc(
+          width / 2,
+          height - rOffset,
+          centerR,
+          -ang,
+          -Math.PI + ang,
+          true
+        );
+        ctx.closePath();
+
+        ctx.stroke();
+      }
+
+      gameToCanvasLength(length) {
+        return length * this.ppm;
+      }
+
+      gameToCanvasPos([x, y]) {
+        return [
+          (x - this.camera.position.x) * this.ppm + this.canvas.width / 2,
+          (y - this.camera.position.y) * this.ppm + this.canvas.height / 2,
+        ];
+      }
+    }
+
+    class PreviewGameCanvas extends GameCanvasBase {
+      constructor(canvas, getObjects) {
+        super(canvas, getObjects);
+      }
+
+      resizeCanvas(field) {
+        const padding = 10;
+        const style = window.getComputedStyle(this.canvas);
+        this.canvas.width = parseFloat(style.width) * this.pixelRatio;
+        const ppm =
+          (this.canvas.width - 2 * padding) / field.width / this.pixelRatio;
+        const height = ppm * field.height + 2 * padding;
+        this.canvas.style.height = `${height.toFixed()}px`;
+        this.canvas.height = height * this.pixelRatio;
+        field.lineColor = "#000";
+        field.lineWidth = 1;
+        return ppm;
+      }
+
+      init({ field }) {
+        field = Object.assign({}, field);
+        super.init({ field, ppm: this.resizeCanvas(field) });
+      }
+
+      drawGround(ctx) {}
+
+      drawObject(/**@type {CanvasRenderingContext2D}*/ ctx, obj) {
+        if (!obj.position || !obj.avatar || obj.hidden) {
+          return;
+        }
+        const drawObject = (obj) => {
+          let {
+            position: { x, y },
+            avatar,
+            size,
+          } = obj;
+          [x, y] = this.gameToCanvasPos([x, y]);
+          size = 8;
+          const halfSize = size / 2;
+          if (
+            x < -halfSize ||
+            y < -halfSize ||
+            x > this.canvas.width + halfSize ||
+            y > this.canvas.height + halfSize
+          ) {
+            return;
+          }
+          ctx.beginPath();
+          ctx.arc(x, y, size / 2, 0, Math.PI * 2, true);
+          ctx.closePath();
+          ctx.fillStyle = obj.color?.bg || "#000";
+          ctx.fill();
+        };
+        drawObject(obj);
+      }
+    }
+
+    class GameCanvas extends GameCanvasBase {
+      constructor(canvas, getObjects, camera) {
+        super(canvas, getObjects, camera);
+      }
+    }
+
+    class Teem {
+      constructor(info, members, homeField = false) {
+        this.registerProperties("score", "startTeem", "color");
+        this.score = 0;
+        Object.assign(this, info, { homeField, members });
+        members.forEach((p) => p.join(this));
+      }
+    }
+
+    class Point {
+      constructor(x, y, registerProperties = false) {
+        if (registerProperties) {
+          this.registerProperties(this, "x", "y");
+        }
+        Object.assign(this, { x, y });
+      }
+
+      dist(from) {
+        if (!from || (from.x === this.x && from.y === this.y)) {
+          return 0;
+        }
+        return Math.hypot(this.x - from.x, this.y - from.y);
+      }
+    }
+
+    class GameObject {
+      constructor() {
+        this.registerProperties(
+          "target",
+          "position",
+          "avatar",
+          "size",
+          "speed"
+        );
+      }
+
+      setPosition(position) {
+        this.position = position;
+        this.updateFromTarget();
+        if (this.children?.length) {
+          this.children.forEach((c) => c.setPosition(position));
+        }
+      }
+
+      updateFromTarget() {
+        if (!this.position) {
+          this.fromTarget = 0;
+          return;
+        }
+        this.fromTarget = this.position.dist(this.target);
+      }
+
+      addWaiting(dt) {
+        if (!dt) {
+          return;
+        }
+        this.waitingUntil = (this.waitingUntil || this.time) + dt;
+      }
+
+      update(time) {
+        this.time = time;
+        if (this.waitingUntil) {
+          if (!this.lastWaitingTime) {
+            this.lastWaitingTime = time;
+            return;
+          }
+          this.waitingUntil -= time - this.lastMoveTime;
+          this.lastWaitingTime = time;
+          if (this.waitingUntil <= 0) {
+            this.waitingUntil = undefined;
+            this.lastWaitingTime = undefined;
+          } else {
+            return;
+          }
+        }
+        if (!this.speed || !this.target) {
+          this.velocity = undefined;
+          return;
+        }
+        this.updateFromTarget();
+        if (this.fromTarget < Number.EPSILON) {
+          this.setPosition(this.target);
+          this.setTarget();
+          this.velocity = undefined;
+          return;
+        }
+        const lastMoveTime = this.lastMoveTime;
+        this.lastMoveTime = time;
+        if (!lastMoveTime) {
+          this.velocity = undefined;
+          return;
+        }
+        const dt = Math.max(0, time - lastMoveTime);
+        if (!dt) {
+          this.velocity = undefined;
+          return;
+        }
+        const speed =
+          this.speed * (1 + (2 * Math.random() - 1) * (this.error?.speed || 0));
+        if (speed < 0) {
+          this.velocity = undefined;
+        }
+        const dx =
+          (dt * speed * (this.target.x - this.position.x)) / this.fromTarget;
+        const dy =
+          (dt * speed * (this.target.y - this.position.y)) / this.fromTarget;
+        const s = Math.hypot(dx, dy);
+
+        if (this.fromTarget - s < Number.EPSILON) {
+          this.setPosition(this.target);
+          this.setTarget();
+          this.velocity = undefined;
+        } else {
+          this.setPosition(
+            new Point(this.position.x + dx, this.position.y + dy)
+          );
+          this.velocity = new Point(dx / dt, dy / dt);
+        }
+      }
+
+      setTarget(target) {
+        this.target = target;
+        this.updateFromTarget();
+        this.lastMoveTime = undefined;
+      }
+    }
+
+    class PlayerObject extends GameObject {
+      constructor(info, controller) {
+        super();
+        Object.assign(this, info);
+        this.controller = controller;
+        controller.player = this;
+      }
+
+      join(teem) {
+        this.teem = teem;
+        this.homeField = this.teem.homeField;
+        this.avatar = this.teem.homeField
+          ? this.homeAvatar
+          : this.visitingAvatar;
+        this.color = this.teem.homeField ? this.homeColor : this.visitingColor;
+      }
+    }
+
+    class CameraObject extends GameObject {
+      constructor(info) {
+        super();
+        Object.assign(this, info);
+      }
+    }
+
+    class BallObject extends GameObject {
+      constructor(info) {
+        super();
+        Object.assign(this, info);
+      }
+
+      getFlyTime(dist) {
+        //at^2/2
+        return Math.sqrt((2 * dist) / this.a);
+      }
+
+      getFlyDistance(t) {
+        return (Math.pow(t, 2) * this.a) / 2;
+      }
+
+      setTarget(target) {
+        super.setTarget(target);
+        if (target) {
+          this.lastMoveTime = this.time;
+          const flyTime = this.getFlyTime(this.target.dist(this.position));
+          this.flyTime = this.time + flyTime;
+          this.velocity = new Point(
+            (this.target.x - this.position.x) / flyTime,
+            (this.target.y - this.position.y) / flyTime
+          );
+        }
+      }
+
+      update(time) {
+        this.time = time;
+        if (!this.target) {
+          return;
+        }
+        if (this.flyTime === undefined) {
+          return;
+        }
+
+        const moveToTarget = () => {
+          this.setPosition(this.target);
+          this.setTarget();
+          this.velocity = undefined;
+        };
+
+        const dt = time - this.lastMoveTime;
+        if (dt <= 0) {
+          return;
+        }
+        if (time >= this.flyTime) {
+          moveToTarget();
+          return;
+        }
+        const dist =
+          this.getFlyDistance(this.flyTime - this.lastMoveTime) -
+          this.getFlyDistance(this.flyTime - time);
+        this.lastMoveTime = time;
+        const r = dist / this.fromTarget;
+        const dx = r * (this.target.x - this.position.x);
+        const dy = r * (this.target.y - this.position.y);
+        this.velocity = new Point(dx / dt, dy / dt);
+        this.setPosition(new Point(this.position.x + dx, this.position.y + dy));
+        if (this.fromTarget < Number.EPSILON) {
+          moveToTarget();
+        }
+      }
+    }
+
+    class Game {
+      constructor() {
+        const updatePauseMenu = () => {
+          this.pauseMenu.name = !this.running ? "▶️" : "⏹️";
+        };
+        this.registerProperties(
+          "viewPort",
+          "remainTime",
+          "gameTime",
+          "menusItems",
+          "teems",
+          [
+            "runningTime",
+            () => {
+              this.remainTime = new Date(
+                (16 * 60 * 60 + Math.abs(this.gameTime - this.runningTime)) *
+                  1000
+              ).toLocaleTimeString();
+              if (this.runningTime > this.gameTime) {
+                this.sessionFinished = 0;
+                this.finished = true;
+              }
+            },
+          ],
+          ["finished", updatePauseMenu],
+          ["running", updatePauseMenu]
+        );
+        /** @type { Object.<string,HTMLElement> } */
+        this.components;
+        this.gameTime = 0;
+        this.clock = new Clock(60);
+        this.pauseMenu = {
+          onclick: () => this.toggleRunning(true),
+        };
+        registerProperties(this.pauseMenu, "name");
+        updatePauseMenu();
+        this.menusItems = [this.pauseMenu];
+      }
+
+      toggleRunning(manualToggle = false) {
+        if (this.finished && manualToggle) {
+          window.location.reload();
+          return;
+        }
+        if (!this.clock) {
+          return;
+        }
+        this.running = !this.running;
+        if (this.running) {
+          this.clock.startOrResume();
+        } else {
+          this.clock.pause();
+        }
+      }
+
+      createApi(player) {
+        const canKick = () => {
+          if (this.ball.carrier) {
+            return this.ball.carrier === player;
+          }
+          const position = player.position;
+          const ballPosition = this.ball.position;
+          return (
+            position &&
+            ballPosition &&
+            position.dist(ballPosition) < (player.size + this.ball.size) / 2
+          );
+        };
+        const canCarry = () => {
+          if (!player.canCarry) {
+            return false;
+          }
+          if (this.ball.carrier) {
+            return false;
+          }
+          return canKick();
+        };
+        return {
+          player: player.apiInfo,
+          runTo: (target) => {
+            if (player.waitingUntil) {
+              return;
+            }
+            player.setTarget(target);
+            return true;
+          },
+          canKick,
+          canCarry,
+          kickTo: (target) => {
+            if (player.waitingUntil) {
+              return;
+            }
+            if (!canKick()) {
+              return;
+            }
+            if (this.ball.carrier) {
+              this.ball.carrier.children = undefined;
+              this.ball.carrier = undefined;
+              this.ball.hidden = undefined;
+            }
+            const relaveSpeed = (source, target) => {
+              return Math.hypot(
+                (source.velocity?.x || 0) - (target.velocity?.x || 0),
+                (source.velocity?.y || 0) - (target.velocity?.y || 0)
+              );
+            };
+
+            if (relaveSpeed(this.ball, player) > player.innterruptSpeed) {
+              return;
+            }
+            const sx = Math.sign(target.x - this.ball.position.x);
+            const sy = Math.sign(target.y - this.ball.position.y);
+            const kickLength = player.kickLength;
+            let targetLength = target.dist(this.ball.position);
+            let opt = 1;
+            if (targetLength > kickLength) {
+              opt *= kickLength / targetLength;
+            }
+            opt *= 1 + (2 * Math.random() - 1) * player.error.kickLength;
+            targetLength *= opt;
+            target = new Point(
+              this.ball.position.x + opt * (target.x - this.ball.position.x),
+              this.ball.position.y + opt * (target.y - this.ball.position.y)
+            );
+            if (targetLength < Number.EPSILON) {
+              return;
+            }
+            let angle = Math.acos(
+              (target.x - this.ball.position.x) / targetLength
+            );
+            angle += ((2 * Math.random() - 1) * player.error.kickAngle) / 180;
+            target = new Point(
+              this.ball.position.x +
+                targetLength * Math.abs(Math.cos(angle)) * sx,
+              this.ball.position.y +
+                targetLength * Math.abs(Math.sin(angle)) * sy
+            );
+            this.ball.setTarget(target);
+            player.addWaiting(player.waitingTime.kick);
+            return true;
+          },
+          carry: () => {
+            if (!canCarry()) {
+              return;
+            }
+            this.ball.carrier = player;
+            player.children = [this.ball];
+            this.ball.hidden = true;
+            return true;
+          },
+          teems: this.teemInfos,
+          ball: this.ballInfo,
+          field: this.fieldInfo,
+          game: this.gameInfo,
+        };
+      }
+
+      createObjectInfo(obj, ...props) {
+        if (props.length === 0) {
+          props = Object.keys(obj);
+        }
+        const info = {};
+        for (const p of props) {
+          Object.defineProperty(info, p, {
+            get: () => {
+              return obj[p];
+            },
+          });
+        }
+        return info;
+      }
+
+      checkBallIn() {
+        const { x, y } = this.ball.position;
+        const indoorX =
+          Math.abs(x - this.field.width / 2) < this.field.doorWidth / 2;
+        if (!indoorX) {
+          return;
+        }
+        if (y < 0) {
+          console.log("home win");
+          this.sessionFinished = 1;
+          return true;
+        } else if (y > this.field.height) {
+          console.log("visiting win");
+          this.sessionFinished = -1;
+          return true;
+        }
+      }
+
+      checkBallOut() {
+        const { x, y } = this.ball.position;
+        if (x < 0 || x > this.field.width || y < 0 || y > this.field.height) {
+          this.sessionFinished = 0;
+          return true;
+        }
+      }
+
+      followBallView() {
+        if (this.checkBallIn()) {
+          return;
+        }
+        if (this.checkBallOut()) {
+          return;
+        }
+        let {
+          width,
+          height,
+          position: { x: centerX, y: centerY },
+        } = this.camera;
+        // let { width, height } = this.field
+        const paddingOpt = 0.1;
+        width -= width * paddingOpt * 2;
+        height -= height * paddingOpt * 2;
+        const { x, y } = this.camera.target || this.ball.position;
+        let dx = Math.min(0, x - (centerX - width / 2));
+        if (!dx) {
+          dx = Math.max(0, x - (centerX + width / 2));
+        }
+
+        let dy = Math.min(0, y - (centerY - height / 2));
+        if (!dy) {
+          dy = Math.max(0, y - (centerY + height / 2));
+        }
+
+        if (dx || dy) {
+          this.setCamera(
+            new Point(
+              Math.max(width / 2, Math.abs(dx) * 2) * Math.sign(dx) + centerX,
+              Math.max(height / 2, Math.abs(dy) * 2) * Math.sign(dy) + centerY
+            ),
+            10
+          );
+        }
+      }
+
+      setCamera(center, speed = 0) {
+        if (!speed) {
+          this.camera.setTarget();
+          this.camera.setPosition(center);
+          this.canvases.forEach((c) => c.drawFrame());
+        } else {
+          this.camera.speed = speed;
+          this.camera.setTarget(center);
+        }
+      }
+
+      init({ field, ppm, gameTime, teems, teemColors, ball }, modal) {
+        this.gameTime = gameTime;
+        Object.assign(this, modal);
+        this.gameInfo = this.createObjectInfo(this, "runningTime");
+        this.field = field;
+        this.fieldInfo = this.createObjectInfo(this.field);
+        this.ball = new BallObject(ball);
+        // this.ball.setPosition(new Point(field.width / 2, field.height / 2))
+        this.ball.on("position", this.followBallView.bind(this));
+        this.ballInfo = this.createObjectInfo(this.ball, "size", "a", "speed");
+        Object.defineProperty(this.ballInfo, "position", {
+          get: () =>
+            this.ball.position &&
+            new Point(this.ball.position.x, this.ball.position.y),
+        });
+        Object.defineProperty(this.ballInfo, "target", {
+          get: () =>
+            this.ball.target &&
+            new Point(this.ball.target.x, this.ball.target.y),
+        });
+        const colors = teemColors;
+        const getTeemColor = (tId) => colors[tId];
+        this.teems = teems.map(
+          (t, tId) =>
+            new Teem(
+              Object.assign({}, t, { color: getTeemColor(tId) }),
+              t.members.map(
+                (m, id) =>
+                  new PlayerObject(
+                    Object.assign({}, m, { id, color: getTeemColor(tId) }),
+                    new m.ai()
+                  )
+              ),
+              tId === 0
+            )
+        );
+        this.teemInfos = this.teems.map((t) => {
+          const tInfo = this.createObjectInfo(
+            t,
+            "homeField",
+            "name",
+            "startTeem",
+            "score"
+          );
+          const members = t.members.map((p) => {
+            const pInfo = this.createObjectInfo(
+              p,
+              "id",
+              "name",
+              "speed",
+              "size",
+              "kickLength",
+              "innterruptSpeed",
+              "waitingUntil",
+              "waitingTime"
+            );
+            Object.defineProperty(pInfo, "position", {
+              get: () => p.position && new Point(p.position.x, p.position.y),
+            });
+            pInfo.teem = tInfo;
+            p.apiInfo = pInfo;
+            return pInfo;
+          });
+          Object.defineProperty(tInfo, "members", {
+            get: () => members,
+          });
+        });
+        this.players = this.teems.map((t) => t.members).flat();
+        this.playerControllers = this.players.map((p) => {
+          p.controller.api = this.createApi(p);
+          return p.controller;
+        });
+        this.gameObjects = [...this.players, this.ball];
+        const getObjects = () => this.gameObjects;
+        this.camera = new CameraObject();
+        this.camera.on("position", () => {
+          this.canvases.forEach((c) => (c.cameraUpdated = true));
+          const camera = this.camera;
+          const toPercentage = (n) => (100 * n).toFixed(2) + "%";
+          const width = camera.width / field.width;
+          const height = camera.height / field.height;
+          const left = camera.position.x / field.width - width / 2;
+          const top = camera.position.y / field.height - height / 2;
+          this.viewPort = {
+            top: toPercentage(top),
+            left: toPercentage(left),
+            width: toPercentage(width),
+            height: toPercentage(height),
+          };
+        });
+        const previewCanvas = new PreviewGameCanvas(
+          this.components.previewCanvas,
+          getObjects
+        );
+        const bgPreviewCanvas = new PreviewGameCanvas(
+          this.components.bgPreviewCanvas
+        );
+        const canvas = new GameCanvas(
+          this.components.canvas,
+          getObjects,
+          this.camera
+        );
+        const bgCanvas = new GameCanvas(
+          this.components.bgCanvas,
+          undefined,
+          this.camera
+        );
+        this.canvases = [bgPreviewCanvas, previewCanvas, bgCanvas, canvas];
+        this.canvases.forEach((c) => c.init({ field, ppm }));
+      }
+
+      setCenter($event) {
+        const x = $event.layerX;
+        const y = $event.layerY;
+        const width = $event.currentTarget.clientWidth;
+        const height = $event.currentTarget.clientHeight;
+        this.setCamera(
+          new Point(
+            (x / width) * this.field.width,
+            (y / height) * this.field.height
+          )
+        );
+      }
+
+      async start() {
+        while (!this.finished) {
+          await this.startSession();
+        }
+      }
+
+      async startSession() {
+        this.setCamera(new Point(this.field.width / 2, this.field.height / 2));
+        const startTeem = this.sessionFinished < 0 ? 1 : 0;
+        this.teems.forEach((t) => (t.startTeem = undefined));
+        this.teems[startTeem].startTeem = true;
+        this.sessionFinished = undefined;
+        this.ball.setTarget();
+        this.ball.setPosition(
+          new Point(this.field.width / 2, this.field.height / 2)
+        );
+        this.players.forEach((p) => {
+          p.controller.state = {};
+          p.setTarget();
+          p.setPosition(p.controller.initPos());
+        });
+        this.canvases.forEach((c) => c.drawFrame());
+        await this.toast("startSession", 1000);
+        !this.running && this.toggleRunning();
+        await Promise.all([this.gameLoop(), this.uiLoop()]);
+        this.running && this.toggleRunning();
+        if (this.sessionFinished) {
+          this.teems[this.sessionFinished > 0 ? 0 : 1].score++;
+        }
+        await this.toast("finishSession_" + (this.sessionFinished || ""), 1000);
+      }
+
+      async uiLoop() {
+        let framming = false;
+        while (undefined === this.sessionFinished && !this.finished) {
+          // await new Promise(resolve => {
+          //   requestAnimationFrame(() => {
+          //     this.canvases.forEach(c => c.drawFrame())
+          //     resolve()
+          //   })
+          // })
+          await this.clock.wait(1);
+          if (framming) {
+            continue;
+          }
+          framming = true;
+          requestAnimationFrame(() => {
+            this.canvases.forEach((c) => c.drawFrame());
+            framming = false;
+          });
+        }
+      }
+
+      async gameLoop() {
+        while (undefined === this.sessionFinished && !this.finished) {
+          await this.clock.wait(5);
+          let time = this.clock.tickTime;
+          this.runningTime = time;
+          for (let controller of this.playerControllers) {
+            controller.update();
+          }
+          this.camera.update(time);
+          for (let obj of this.gameObjects) {
+            obj.update(time);
+          }
+        }
+      }
+    }
+  </script>
+  <template id="app-game" view-model="Game">
+    <canvas class="canvas" id="bgCanvas"></canvas>
+    <canvas class="canvas" id="canvas"></canvas>
+    <div class="preview">
+      <canvas onclick.="setCenter($event)" id="bgPreviewCanvas"></canvas>
+      <canvas onclick.="setCenter($event)" id="previewCanvas"></canvas>
+      <div
+        if.="viewPort"
+        style-width$.="viewPort.width"
+        style-height$.="viewPort.height"
+        style-top$.="viewPort.top"
+        style-left$.="viewPort.left"
+        class="canvasViewPort"
+      ></div>
+    </div>
+    <style>
+      :host {
+        display: block;
+      }
+
+      .canvas {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+      }
+
+      #canvas {
+        filter: drop-shadow(1px 1px 2px black);
+      }
+
+      .preview {
+        position: absolute;
+        right: 10px;
+        top: 50px;
+        width: 30%;
+        max-width: 30vh;
+        min-height: 10px;
+        background: #0001;
+      }
+
+      #previewCanvas,
+      #bgPreviewCanvas {
+        width: 100%;
+        height: 100%;
+      }
+
+      #bgPreviewCanvas {
+        position: absolute;
+        top: 0;
+        left: 0;
+      }
+
+      .canvasViewPort {
+        position: absolute;
+        box-sizing: border-box;
+        border: 2px dashed #000;
+        pointer-events: none;
+      }
+    </style>
+  </template>
+  <script>
+    window.appData = window.appData || {
+      players: {
+        __base: {
+          size: 0.7,
+          speed: 4,
+          kickLength: 10,
+          visitingAvatar: "😎",
+          homeAvatar: "👽",
+          visitingColor: {
+            bg: "yellow",
+            fg: "black",
+          },
+          homeColor: {
+            bg: "red",
+            fg: "white",
+          },
+          innterruptSpeed: 5,
+          ai: "FoolPlayer",
+          error: {
+            kickLength: 0.3,
+            kickAngle: 5,
+            speed: 0.3,
+          },
+          waitingTime: {
+            kick: 0.25,
+          },
+        },
+        Messi: {},
+        Ronaldo: {
+          ai: "SimplePlayer",
+        },
+        deGea: {
+          visitingAvatar: "🌚",
+          homeAvatar: "🌚",
+          visitingColor: {
+            bg: "white",
+            fg: "black",
+          },
+          homeColor: {
+            bg: "white",
+            fg: "black",
+          },
+          kickLength: 20,
+          ai: "SimpleGoalKeeper",
+          speed: 6,
+          innterruptSpeed: 10,
+          canCarry: true,
+        },
+      },
+      balls: {
+        __base: {
+          size: 0.2,
+          avatar: "⚽️",
+          a: 5,
+        },
+        standard: {},
+      },
+      teems: {
+        __base: {
+          members: ["Messi", "Messi", "Ronaldo", "deGea"],
+        },
+        RealMadrid: {},
+        Barcelona: {},
+        MUFC: {},
+      },
+      fields: {
+        __base: {
+          useAvatar: false,
+          width: 68,
+          height: 105,
+          groundColor: "#008000",
+          grassColor: "#008000",
+          lightGrassColor: "#009000",
+          lineColor: "#fffa",
+          lineWidth: 0.1,
+          centerR: 9.15,
+          cornerR: 1,
+          rOffset: 11,
+          doorWidth: 7.32,
+          doorHeight: 2,
+          inBoxR: 5.5,
+          outBoxR: 16.5,
+          bandsCount: 8,
+        },
+        standard: {},
+      },
+      gameTime: 5400,
+      ppm: 30,
+      teemColors: [
+        {
+          bg: "red",
+          fg: "white",
+        },
+        {
+          bg: "yellow",
+          fg: "black",
+        },
+      ],
+      languages: {
+        "zh-CN": {
+          teem: "球队",
+          player: "球员",
+          field: "球场",
+          standard: "标准",
+          Messi: "梅西",
+          Ronaldo: "罗纳尔多",
+          deGea: "德吉亚",
+          RealMadrid: "皇马",
+          Barcelona: "巴萨",
+          MUFC: "曼联",
+          startSession: "开球",
+          finishSession_: "结束",
+          "finishSession_-1": "客队进球",
+          finishSession_1: "主队进球",
+        },
+      },
+    };
+  </script>
+
+  <script>
+    class ConfigManager {
+      constructor(defaultKeyName = "__id") {
+        this.baseKey = "__base";
+        this.extendKey = "__extend";
+        this.mergeKeyPrefix = "+";
+        this.defaultKeyName = defaultKeyName;
+      }
+
+      getChildNames(obj) {
+        if (!obj) {
+          return undefined;
+        }
+        return Object.keys(obj).filter((k) => k !== this.baseKey);
+      }
+
+      getChildren(obj, keyName) {
+        const names = this.getChildNames(obj);
+        return names && names.map((name) => this.getChild(obj, name, keyName));
+      }
+
+      updateChildren(parent, keyName, ...names) {
+        names.forEach((name) => this.updateChild(parent, name, keyName));
+      }
+
+      updateChild(parent, name, keyName) {
+        if (!parent[name]) {
+          return;
+        }
+        keyName = keyName || this.defaultKeyName;
+        parent[name] = this.getUpdate(parent[name], keyName);
+      }
+
+      getUpdate(obj, keyName) {
+        return Object.fromEntries(
+          this.getChildren(obj, keyName).map((i) => [i[keyName], i])
+        );
+      }
+
+      mergeObj(base, additional) {
+        if (additional === null) {
+          return null;
+        }
+        const m = {};
+
+        const keys = new Map();
+        const objs = [base, additional];
+        for (let i = 0; i < objs.length; i++) {
+          const obj = objs[i];
+          if (!obj) {
+            continue;
+          }
+          for (let kOriginal in obj) {
+            let key = kOriginal;
+            let merge = false;
+            if (kOriginal.startsWith(this.mergeKeyPrefix)) {
+              key = kOriginal.slice(this.mergeKeyPrefix.length);
+              merge = true;
+            }
+            const value = keys.get(key) || { keys: [] };
+            keys.set(key, value);
+            value.merge = merge;
+            value.keys[i] = kOriginal;
+          }
+        }
+        for (let [
+          key,
+          {
+            keys: [kBase, kAdditional],
+            merge,
+          },
+        ] of keys) {
+          kBase = kBase || key;
+          kAdditional = kAdditional || key;
+          if (merge) {
+            m[key] = this.mergeObj(base?.[kBase], additional?.[kAdditional]);
+          } else {
+            m[key] =
+              additional?.[kAdditional] !== undefined
+                ? additional[kAdditional]
+                : base?.[kBase];
+          }
+        }
+        return m;
+      }
+
+      getChild(obj, childName, keyName) {
+        if (!obj || !obj[childName]) {
+          return;
+        }
+        keyName = keyName || this.defaultKeyName;
+        const base = obj[childName][this.extendKey]
+          ? this.getChild(obj, obj[childName][this.extendKey], keyName)
+          : obj[this.baseKey];
+        const child = obj[childName];
+        child[keyName] = childName;
+        if (!base) {
+          return child;
+        }
+        return this.mergeObj(base, child);
+      }
+    }
+
+    const Api = {
+      appService: window.os.app,
+      localStorage: window.os.localStorage,
+    };
+
+    class App {
+      constructor() {
+        /** @type { Object.<string,HTMLElement> } */
+        this.components;
+        this.Api = Api;
+        registerProperties(
+          this,
+          "game",
+          "teemA",
+          "teemB",
+          "leftMenus",
+          "rightMenus",
+          [
+            "menuItems",
+            () => {
+              let halfLength = Math.floor(this.menuItems.length / 2);
+              this.leftMenus = this.menuItems.slice(0, halfLength);
+              this.rightMenus = this.menuItems.slice(halfLength);
+            },
+          ]
+        );
+        this.configManager = new ConfigManager("name");
+        this.appMenuItems = [
+          {
+            name: "⏺️",
+            onclick: () => this.shutdown(),
+          },
+        ];
+      }
+
+      async shutdown() {
+        if (this.game?.running) {
+          this.game.toggleRunning();
+        }
+        await this.Api.appService.close();
+      }
+
+      initData(data) {
+        this.configManager.updateChildren(
+          data,
+          this.configManager.defaultKeyName,
+          "players",
+          "teems",
+          "balls",
+          "fields",
+          "languages"
+        );
+        this.configManager
+          .getChildren(data.players)
+          .forEach((p) => (p.ai = eval(p.ai)));
+        for (let teem of this.configManager.getChildren(data.teems)) {
+          teem.members = teem.members.map((name) => data.players[name]);
+        }
+        return data;
+      }
+      async start() {
+        this.languages = new Proxy(Object.values(this.data.languages)[0], {
+          get: (target, p, _) => {
+            return target[p] === undefined ? p : target[p];
+          },
+        });
+        window.languages = this.languages;
+        /** @type { { toast:(msg:string, timeout:number = 1000)=>Promise<any> } } */
+        this.modal_ = this.components.modal.model;
+        /**@type {Game} */
+        this.game = this.components.gameView.model;
+        this.menuItems = [
+          ...(this.game.menusItems || []),
+          ...this.appMenuItems,
+        ];
+        this.game.on("menusItems", () => {
+          this.menuItems = [...this.game.menusItems, ...this.appMenuItems];
+        });
+        this.game.on("teems", () => {
+          this.teemA = this.game.teems[0];
+          this.teemB = this.game.teems[1];
+        });
+        const field = Object.values(this.data.fields)[0];
+        const teems = this.configManager
+          .getChildren(this.data.teems)
+          .slice(0, 2);
+        const ball = Object.values(this.data.balls)[0];
+        const gameTime = this.data.gameTime;
+        const ppm = this.data.ppm;
+        this.game.init(
+          {
+            field,
+            ppm,
+            gameTime,
+            teems,
+            ball,
+            teemColors: this.data.teemColors,
+          },
+          {
+            toast: async (msgKey, timeout, wait) => {
+              await this.modal_.toast(this.languages[msgKey], timeout, wait);
+            },
+          }
+        );
+        await this.game.start();
+      }
+    }
+  </script>
+  <template id="app-team" view-model>
+    <div>
+      <div if.="this.name">
+        <div
+          class="teem-info"
+          style-background$.="color.bg"
+          style-color$.="color.fg"
+        >
+          <span class="teem-name" inner-text$.="languages[name]"></span>
+          <span class="teem-score" inner-text$.="score"></span>
+        </div>
+      </div>
+    </div>
+    <style>
+      :host {
+      }
+
+      .teem-info {
+        /* font-size: large; */
+        padding: 2 5px;
+        border-radius: 5px;
+      }
+
+      .teem-name {
+      }
+
+      .teem-score {
+      }
+    </style>
+  </template>
+  <template id="app-main" view-model="App">
+    <div class="app">
+      <app-game id="gameView"></app-game>
+      <div class="menu">
+        <div
+          class="button"
+          for.="menu of leftMenus"
+          onclick.="menu.onclick()"
+          inner-text$.="menu.name"
+        ></div>
+        <app-team if.="teemB" model.="teemB"></app-team>
+        <div class="title">
+          <span if.="game" inner-text$.="game.remainTime || ''"></span>
+        </div>
+        <app-team if.="teemA" model.="teemA"></app-team>
+        <div
+          class="button"
+          for.="menu of rightMenus"
+          onclick.="menu.onclick()"
+          inner-text$.="menu.name"
+        ></div>
+      </div>
+    </div>
+    <modal-panel id="modal"></modal-panel>
+    <style>
+      :host {
+        display: block;
+      }
+
+      .app,
+      #gameView {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+      }
+
+      .menu {
+        display: flex;
+        justify-content: center;
+        padding-top: 50px;
+        align-items: center;
+        opacity: 0.8;
+      }
+
+      .menu .button {
+        margin: 0 5px;
+        font-size: 1.5em;
+      }
+
+      .menu .title {
+        margin: 0 5px;
+        background: #fff;
+        padding: 2px 5px;
+        border-radius: 5px;
+        font-weight: bold;
+        width: 80px;
+        text-align: center;
+      }
+    </style>
+  </template>
+  <script>
+    window.appData = window.appData || {
+      players: {
+        __base: {
+          size: 0.7,
+          speed: 4,
+          kickLength: 10,
+          visitingAvatar: "😎",
+          homeAvatar: "👽",
+          visitingColor: {
+            bg: "yellow",
+            fg: "black",
+          },
+          homeColor: {
+            bg: "red",
+            fg: "white",
+          },
+          innterruptSpeed: 5,
+          ai: "FoolPlayer",
+          error: {
+            kickLength: 0.3,
+            kickAngle: 5,
+            speed: 0.3,
+          },
+          waitingTime: {
+            kick: 0.25,
+          },
+        },
+        Messi: {},
+        Ronaldo: {
+          ai: "SimplePlayer",
+        },
+        deGea: {
+          visitingAvatar: "🌚",
+          homeAvatar: "🌚",
+          visitingColor: {
+            bg: "white",
+            fg: "black",
+          },
+          homeColor: {
+            bg: "white",
+            fg: "black",
+          },
+          kickLength: 20,
+          ai: "SimpleGoalKeeper",
+          speed: 6,
+          innterruptSpeed: 10,
+          canCarry: true,
+        },
+      },
+      balls: {
+        __base: {
+          size: 0.2,
+          avatar: "⚽️",
+          a: 5,
+        },
+        standard: {},
+      },
+      teems: {
+        __base: {
+          members: ["Messi", "Messi", "Ronaldo", "deGea"],
+        },
+        RealMadrid: {},
+        Barcelona: {},
+        MUFC: {},
+      },
+      fields: {
+        __base: {
+          useAvatar: false,
+          width: 68,
+          height: 105,
+          groundColor: "#008000",
+          grassColor: "#008000",
+          lightGrassColor: "#009000",
+          lineColor: "#fffa",
+          lineWidth: 0.1,
+          centerR: 9.15,
+          cornerR: 1,
+          rOffset: 11,
+          doorWidth: 7.32,
+          doorHeight: 2,
+          inBoxR: 5.5,
+          outBoxR: 16.5,
+          bandsCount: 8,
+        },
+        standard: {},
+      },
+      gameTime: 5400,
+      ppm: 30,
+      teemColors: [
+        {
+          bg: "red",
+          fg: "white",
+        },
+        {
+          bg: "yellow",
+          fg: "black",
+        },
+      ],
+      languages: {
+        "zh-CN": {
+          teem: "球队",
+          player: "球员",
+          field: "球场",
+          standard: "标准",
+          Messi: "梅西",
+          Ronaldo: "罗纳尔多",
+          deGea: "德吉亚",
+          RealMadrid: "皇马",
+          Barcelona: "巴萨",
+          MUFC: "曼联",
+          startSession: "开球",
+          finishSession_: "结束",
+          "finishSession_-1": "客队进球",
+          finishSession_1: "主队进球",
+        },
+      },
+    };
+  </script>
+
+  <meta
+    name="viewport"
+    content="width=device-width, maximum-scale=1.0,user-scalable=no, initial-scale=1"
+  />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="transparent" />
+  <script>
+    const {
+      registerElement,
+      registerProperties,
+      evalInContext,
+      delayDispatcher,
+    } = (() => {
+      const evalInContext = (exp, context) => {
+        return function () {
+          with (this) {
+            try {
+              return eval(`(${exp})`);
+            } catch (e) {
+              console.log(exp);
+              console.log(e);
+              return;
+            }
+          }
+        }.call(context);
+      };
+
+      const removeItem = (item) => {
+        const clearItem = (/**@type {HTMLElement}*/ item) => {
+          for (let c of item.childNodes) {
+            clearItem(c);
+          }
+          let onRemoves = item.onRemoves;
+          item.onRemoves = undefined;
+          if (onRemoves?.length) {
+            onRemoves.forEach((onRemove) => onRemove());
+          }
+        };
+        clearItem(item);
+        item.remove();
+      };
+
+      const onprop = (parent, /**@type {String} */ exp, context, listener) => {
+        const tokens = exp.split(/\.|\?\.|\[|\]/);
+        if (!tokens[1]) {
+          if (context.tmpCtxName === tokens[0]) {
+          } else {
+            context.on && context.on(tokens[0], listener, true, parent);
+            parent.onRemoves = [
+              ...(parent.onRemoves || []),
+              () => {
+                context.off(tokens[0], listener, true);
+              },
+            ];
+          }
+          return;
+        }
+        if (context.tmpCtxName === tokens[0]) {
+          context = context[context.tmpCtxName];
+          tokens.shift();
+        }
+        const clearBind = (current) => {
+          while (current) {
+            if (current.off) {
+              current.off();
+            }
+            const next = current.next;
+            current.next = undefined;
+            current = next;
+          }
+        };
+        const register = (tokens, handler, context, offChain) => {
+          const prop = tokens[0];
+          if (!prop || !context) {
+            return;
+          }
+          offChain.next = {};
+          const registerNext = () => {
+            register(tokens.slice(1), handler, context[prop], offChain.next);
+          };
+          if (context.on && context.on instanceof Function) {
+            const listener = (...args) => {
+              clearBind(offChain.next);
+              offChain.next = {};
+              registerNext();
+              handler(...args);
+            };
+            context.on(prop, listener, true, parent);
+            offChain.off = () => {
+              context.off(prop, listener, true);
+            };
+          }
+          registerNext();
+        };
+        const offChain = {};
+        register(tokens, listener, context, offChain);
+        parent.onRemoves = [
+          ...(parent.onRemoves || []),
+          () => {
+            clearBind(offChain);
+          },
+        ];
+      };
+
+      const bindingForInstruction = (/**@type HTMLElement */ element) => {
+        let forExp = element.getAttribute("for.");
+        const match = forExp.match(
+          /^\s*(((let|const|of)\s+)?(\w+)\s+(of|in)\s+)?\s*(.+)\s*$/
+        );
+        if (!match || !match[6]) {
+          throw new Error("Invalid for Expression");
+        }
+        const collectionName = match[6];
+        const of_in = match[5] || "of";
+        let varName = match[4];
+        let forHead;
+        if (varName) {
+          forHead = `for(const ${varName} ${of_in} ${collectionName})`;
+        } else {
+          varName = "$$i";
+          forHead = `for(const ${varName} of ${collectionName})`;
+        }
+        const comment = document.createComment(element.outerHTML);
+        const parent = element.parentElement;
+        parent.insertBefore(comment, element);
+        element.remove();
+        /**@type Map<any, HTMLElement> */
+        let items = new Map();
+        /**@type Map<any, HTMLElement> */
+        let newItems = new Map();
+        let idx = 0;
+        let allRemoved = false;
+        const update = () => {
+          (function ($$forEach) {
+            newItems = new Map();
+            idx = 0;
+            allRemoved = false;
+            with (this) {
+              eval(`
+          let collection
+          try{
+            collection = this.${collectionName}
+          }
+          catch{
+            //ignore
+          }
+          if (collection) {
+            ${forHead}{
+              $$forEach(${varName})
+              }
+          }`);
+            }
+            for (const [_, { item }] of items) {
+              removeItem(item);
+            }
+            items = newItems;
+          }.call(element.context, ($$i) => {
+            /**@type HTMLElement */
+            let item;
+            if (items.has($$i)) {
+              const pair = items.get($$i);
+              item = pair.item;
+              if (!allRemoved && idx !== pair.idx) {
+                console.log("removed");
+                for (const [_, { item }] of items) {
+                  removeItem(item);
+                }
+                allRemoved = true;
+              }
+              items.delete($$i);
+            } else {
+              item = element.cloneNode(true);
+              item.removeAttribute("id");
+              item.removeAttribute("for.");
+              if (item.updateModel) {
+                item.model = $$i;
+              } else {
+                item.modelBeforeInit = $$i;
+              }
+              const context = Object.create(element.context);
+              context[varName] = $$i;
+              context.tmpCtxName = varName;
+              item.context = context;
+            }
+            parent.insertBefore(item, comment);
+            newItems.set($$i, { idx, item });
+            binding(item);
+            idx++;
+          }));
+        };
+        update();
+        let lastContext = element.context;
+        comment.updateWhenModelChange = () => {
+          if (lastContext === element.context) {
+            return;
+          }
+          lastContext = element.context;
+          update();
+        };
+        onprop(parent, collectionName, element.context, update);
+        return {};
+      };
+
+      const bindingIfInstruction = (
+        /**@type HTMLElement */ element,
+        keyChangeRemove
+      ) => {
+        let ifExp = element.getAttribute("if.");
+        const comment = document.createComment(element.outerHTML);
+        const parent = element.parentElement;
+        parent.insertBefore(comment, element);
+        element.remove();
+        let item;
+        let lastValue;
+        const update = () => {
+          const value = evalInContext(ifExp, element.context);
+          if (keyChangeRemove && value !== lastValue && item) {
+            removeItem(item);
+            item = undefined;
+          }
+          if (value) {
+            if (item) {
+              return;
+            }
+            item = element.cloneNode(true);
+            item.removeAttribute("if.");
+            item.removeAttribute("keyif.");
+            parent.insertBefore(item, comment);
+            item.context = element.context;
+            binding(item);
+          } else if (item) {
+            removeItem(item);
+            item = null;
+          }
+        };
+        update();
+        let lastContext = element.context;
+        comment.updateWhenModelChange = () => {
+          if (lastContext === element.context) {
+            return;
+          }
+          lastContext = element.context;
+          update();
+        };
+        for (const exp of getPropsFromExp(ifExp)) {
+          onprop(parent, exp, element.context, update);
+        }
+        return {};
+      };
+
+      const getPropNameFromBindingAttr = (attr) => {
+        return attr.replace(/-(\w)/g, (_, c) => c.toUpperCase());
+      };
+
+      const getPropsFromExp = (exp) => {
+        return exp.match(/([a-zA-Z0-9_$.\[\]]|\?\.)+/g) || [];
+        // return exp.match(/[a-zA-Z0-9_$.]+/g) || []
+      };
+
+      const bindingAttrs = (/**@type HTMLElement */ element) => {
+        if (element.hasAttribute("for.")) {
+          return bindingForInstruction(element);
+        }
+        if (element.hasAttribute("if.")) {
+          return bindingIfInstruction(element, element.hasAttribute("keyif."));
+        }
+        if (element.updateWhenModelChange) {
+          element.updateWhenModelChange();
+          return element;
+        }
+        const bindingAttrs = element
+          .getAttributeNames()
+          .filter((p) => p.endsWith("."));
+        for (const prop of bindingAttrs) {
+          const $$exp = element.getAttribute(prop);
+          const effectedAttr = prop
+            .slice(0, -".".length)
+            .split(",")
+            .map((a) => a.trim())
+            .filter((a) => a);
+
+          if (effectedAttr.some((a) => a.startsWith("on"))) {
+            const value = `(function($event){with(this){${$$exp}}}).call(event.target.context, event)`;
+            for (const ea of effectedAttr) {
+              if (ea.endsWith("$")) {
+                element.setAttribute(
+                  ea.slice(0, -1),
+                  "event.stopPropagation();" + value
+                );
+              } else {
+                element.setAttribute(ea, value);
+              }
+            }
+            continue;
+          }
+          const update = () => {
+            const value = evalInContext($$exp, element.context);
+            for (const ea of effectedAttr) {
+              if (ea === "model") {
+                if (element.updateModel) {
+                  element.updateModel(value);
+                } else {
+                  element.modelBeforeInit = value;
+                }
+                continue;
+              }
+              if (ea === "focus") {
+                if (value) {
+                  if (element.scrollIntoViewIfNeeded) {
+                    element.scrollIntoViewIfNeeded();
+                  } else {
+                    element.scrollIntoView();
+                  }
+                  element.focus();
+                }
+                continue;
+              }
+              if (ea === "scrollintoview") {
+                if (value) {
+                  if (element.scrollIntoViewIfNeeded) {
+                    element.scrollIntoViewIfNeeded();
+                  } else {
+                    element.scrollIntoView();
+                  }
+                }
+                continue;
+              }
+              if (ea.startsWith("class-")) {
+                const className = ea.slice("class-".length);
+                if (value) {
+                  element.classList.add(className);
+                } else {
+                  element.classList.remove(className);
+                }
+                continue;
+              } else if (ea.startsWith("style-")) {
+                const prop = ea.slice("style-".length, -1);
+                element.style.setProperty(prop, value);
+                continue;
+              }
+              if (ea.endsWith("$")) {
+                let prop = getPropNameFromBindingAttr(ea.slice(0, -1));
+                switch (prop) {
+                  case "innerHtml":
+                    prop = "innerHTML";
+                    break;
+                }
+                element[prop] = value;
+                continue;
+              }
+              if (value === undefined || value === null) {
+                element.removeAttribute(ea);
+              } else if (element[ea] !== value) {
+                element.setAttribute(ea, value);
+              }
+            }
+          };
+          update();
+          for (const exp of getPropsFromExp($$exp)) {
+            onprop(element.parentElement, exp, element.context, update);
+          }
+        }
+        return element;
+      };
+
+      const binding = (/**@type HTMLElement */ element) => {
+        /**@type { Object.<string,HTMLElement> } */
+        const components = element.context.components;
+        if (element.hasAttribute) {
+          const handler = bindingAttrs(element);
+          //collect ids
+          if (element.hasAttribute("id")) {
+            components[element.getAttribute("id")] = handler;
+          }
+          if (handler !== element) {
+            return;
+          }
+        }
+        for (const child of [...element.children]) {
+          if (
+            child.context == element.context ||
+            (child.context &&
+              Object.getPrototypeOf(child.context) === element.context)
+          ) {
+          } else {
+            child.context = element.context;
+          }
+          binding(child);
+        }
+      };
+
+      const getNameFromTagName = (tagName) => {
+        return tagName.replace(/(?:^|-)(\w)/g, (_, c) => c.toUpperCase());
+      };
+
+      class DelayDispatcher {
+        constructor(delay = 50) {
+          this.delay = delay;
+          this.currentTask;
+          this.running = false;
+          this.lastDispatchTime = 0;
+          this.groups = new Map();
+          this.count = 0;
+          // this.delayListeners = new Map()
+        }
+
+        set(obj, key, method) {
+          let group = this.groups.get(obj);
+          if (!group) {
+            group = {};
+            this.groups.set(obj, group);
+          }
+          group[key] = method;
+        }
+
+        async start() {
+          if (this.running) {
+            return;
+          }
+          this.running = true;
+          this.currentTask = new Promise(async (resolve) => {
+            while (this.running) {
+              let now = Date.now();
+              let remain = this.delay - (now - this.lastDispatchTime);
+              if (remain > 0) {
+                await new Promise((r) => setTimeout(r, remain));
+              }
+              let groups = this.groups;
+              await new Promise((resolve) =>
+                window.requestAnimationFrame(async () => {
+                  this.groups = new Map();
+                  for (let [obj, group] of groups) {
+                    if (!obj || !group) {
+                      continue;
+                    }
+                    for (let p in group) {
+                      try {
+                        group[p]?.();
+                      } catch (e) {
+                        console.log(e);
+                      }
+                    }
+                  }
+                  resolve();
+                })
+              );
+            }
+            this.lastDispatchTime = Date.now();
+            this.currentTask = undefined;
+            this.running = false;
+            resolve();
+          });
+          await this.currentTask;
+        }
+
+        async stop() {
+          this.running = false;
+          await this.currentTask;
+        }
+
+        setDelay(delay) {
+          this.delay = delay;
+        }
+      }
+
+      const delayDispatcher = new DelayDispatcher();
+
+      const registerProperties = (obj, ...props) => {
+        const backup = {};
+        if (!obj.define) {
+          addPropChange(obj);
+        }
+        props.forEach((prop) => {
+          const desc = Object.getOwnPropertyDescriptor(obj, prop);
+          if (desc && !desc.configurable) {
+            delete backup[prop];
+            return;
+          }
+          let propValue;
+          let [propName, handler] =
+            prop instanceof Array ? prop : [prop, undefined];
+          if (obj[propName] !== undefined) {
+            backup[propName] = obj[propName];
+          }
+          Object.defineProperty(obj, propName, {
+            get() {
+              return propValue;
+            },
+            set(newValue) {
+              if (propValue === newValue) {
+                return;
+              }
+              const oldValue = propValue;
+              propValue = newValue;
+              obj.raise(propName, newValue, oldValue);
+              handler?.(newValue, oldValue);
+              delayDispatcher.set(obj, propName, () => {
+                obj.raise(propName, newValue, oldValue, true);
+              });
+            },
+          });
+        });
+        Object.assign(obj, backup);
+        return obj;
+      };
+
+      const registerAllProperties = (obj) => {
+        return registerProperties(obj, ...Object.keys(obj));
+      };
+
+      Object.defineProperty(Object.prototype, "registerProperties", {
+        value: function (...props) {
+          return registerProperties(this, ...props);
+        },
+      });
+
+      Object.defineProperty(Object.prototype, "registerAllProperties", {
+        value: function () {
+          return registerAllProperties(this);
+        },
+      });
+
+      delayDispatcher;
+
+      const addPropChange = (/**@type { Object } */ obj) => {
+        /**@type Map<string, Set<{(newValue, oldValue):any}>> */
+        const atonceListeners = new Map();
+        const delayListeners = new Map();
+        const thisProp = "this";
+        Object.defineProperty(obj, thisProp, {
+          get() {
+            return obj;
+          },
+        });
+        Object.defineProperty(obj, "define", {
+          value: (...props) => registerProperties(obj, ...props),
+        });
+        Object.defineProperty(obj, "on", {
+          value: (
+            /**@type string */ prop,
+            listener,
+            delay = false,
+            additional
+          ) => {
+            let l = delay ? delayListeners : atonceListeners;
+            if (!l.has(prop)) {
+              l.set(prop, new Map());
+            }
+            l.get(prop).set(listener, additional);
+            if (delay && delayDispatcher?.delayListeners) {
+              delayDispatcher.delayListeners.set(listener, additional);
+            }
+            delayDispatcher.count++;
+          },
+        });
+
+        Object.defineProperty(obj, "off", {
+          value: (prop, listener, delay = false) => {
+            let l = delay ? delayListeners : atonceListeners;
+            if (!l.has(prop)) {
+              return;
+            }
+            l.get(prop).delete(listener);
+            if (delay && delayDispatcher?.delayListeners) {
+              delayDispatcher.delayListeners.delete(listener);
+            }
+            delayDispatcher.count--;
+          },
+        });
+
+        Object.defineProperty(obj, "clearOn", {
+          value: (delay) => {
+            let l = delay ? delayListeners : atonceListeners;
+            delayDispatcher.count -= l.size;
+            if (delay && delayDispatcher?.delayListeners) {
+              l.forEach((_, listener) => {
+                delayDispatcher.delayListeners.delete(listener);
+              });
+            }
+            l.clear();
+            // for (let p in obj) {
+            //   obj[p].clearOn?.(delay)
+            // }
+          },
+        });
+        Object.defineProperty(obj, "dispose", {
+          value: () => {
+            obj.clearOn(false);
+            obj.clearOn(true);
+          },
+        });
+        Object.defineProperty(obj, "hasOn", {
+          value: (prop, delay = false) => {
+            let l = delay ? delayListeners : atonceListeners;
+            return l.has(prop);
+          },
+        });
+
+        Object.defineProperty(obj, "raise", {
+          value: (prop, newValue, oldValue, delay = false) => {
+            if (prop !== thisProp) {
+              obj.raise(thisProp, obj, obj, delay);
+            }
+            let l = delay ? delayListeners : atonceListeners;
+            if (!l.has(prop)) {
+              return;
+            }
+            for (const [listener, _] of l.get(prop)) {
+              listener(newValue, oldValue);
+            }
+          },
+        });
+      };
+
+      const registerElement = (tagName, /**@type { string } */ constructor) => {
+        const elementClassName = `HTML${
+          constructor || getNameFromTagName(tagName)
+        }Element`;
+        constructor = constructor || "Object";
+        eval(`
+    class ${elementClassName} extends HTMLElement{
+      constructor(){
+        super()
+        const shadow = this.attachShadow({mode:'open'})
+        const template = document.getElementById('${tagName}')
+        if(!template || template.tagName !== 'TEMPLATE' ){
+          throw new Error('Define Template')
+        }
+        this.template_ = template
+        this.shadow_ = shadow
+        this.model_ = new ${constructor}()
+        this.model_.components = { host: this.shadow_ }
+        if(this.context && this.hasAttribute('model.')){
+          const modeExp = this.getAttribute('model.')
+          this.model = evalInContext(modeExp, this.context)
+        }else if(this.modelBeforeInit){
+          this.model = this.modelBeforeInit
+        }else{
+          this.model =  {}
+        }
+      }
+
+      rebuildView(){
+        this.shadow_.innerHTML = ''
+        const instance = document.importNode(this.template_.content, true)
+        this.shadow_.appendChild(instance)
+      }
+  
+      get model(){
+        return this.model_
+      }
+  
+      set model(value){
+        if(value?.on){
+          this.model_ = value || {}
+          this.model_.components = { host: this.shadow_ , ...this.model_.components||{}}
+        }else{
+          //combine code behind with model
+          Object.assign(this.model_, value)
+        }
+        this.shadow_.context = this.model_ 
+        this.rebuildView()
+      }
+  
+      updateModel(value){
+        this.model = value
+        this.connectedCallback()
+      }
+      
+      connectedCallback(){
+        binding(this.shadow_)
+        if(this.model_.launch){
+          this.model_.launch()
+        } 
+      }
+    }
+    customElements.define('${tagName}', ${elementClassName})
+    `);
+      };
+      return {
+        registerElement,
+        registerProperties,
+        evalInContext,
+        delayDispatcher,
+      };
+    })();
+
+    const sleep = (timeout) =>
+      new Promise((resolve) => setTimeout(resolve, timeout));
+
+    class AppBase {
+      async launch() {
+        if (this.launched) {
+          return;
+        }
+        this.launched = true;
+        this.storage = this.initStorage_();
+        this.data = await this.initData(window.appData);
+        window.app = this;
+        await this.start();
+      }
+
+      async registerStorageProperties(...props) {
+        if (!this.storage) {
+          return;
+        }
+        let asyncTimeout = 50;
+        const bgTimeout = 200;
+        for (const [prop, defaultValue, onchange] of props) {
+          let propValue;
+          let valueModified = false;
+          let successLoadFromStorage = false;
+          let loadFunc;
+          let bgLoad = false;
+          const mergeValue = (savedValue) => {
+            if (successLoadFromStorage) {
+              return;
+            }
+            successLoadFromStorage = true;
+            if (!valueModified) {
+              valueModified = true;
+              propValue = savedValue;
+            } else {
+              // merge strategy
+              propValue = savedValue;
+            }
+            if (bgLoad && onchange) {
+              onchange();
+            }
+          };
+          loadFunc = async () => {
+            const jsonStr = await this.storage.getItem(prop);
+            let savedValue;
+            if (!jsonStr) {
+              savedValue = defaultValue;
+            } else {
+              try {
+                savedValue = JSON.parse(jsonStr);
+              } catch {
+                savedValue = defaultValue;
+              }
+            }
+            mergeValue(savedValue);
+          };
+          const tryLoad = async () => {
+            bgLoad = true;
+            const func = loadFunc;
+            loadFunc = null;
+            await Promise.race([
+              func(),
+              sleep(bgTimeout).then(() => {
+                if (!successLoadFromStorage) {
+                  loadFunc = func;
+                }
+              }),
+            ]);
+          };
+          await Promise.race([
+            loadFunc(),
+            sleep(asyncTimeout).then(() => {
+              if (!valueModified) {
+                propValue = defaultValue;
+                valueModified = true;
+                asyncTimeout = 0;
+              }
+            }),
+          ]);
+          Object.defineProperty(this, prop, {
+            get() {
+              if (loadFunc) {
+                tryLoad();
+              }
+              return propValue;
+            },
+            set(newValue) {
+              propValue = newValue;
+              if (successLoadFromStorage) {
+                this.storage.setItem(prop, JSON.stringify(propValue));
+              }
+            },
+          });
+        }
+      }
+
+      initStorage_() {
+        if (window.$localStorage) {
+          return window.$localStorage;
+        }
+        try {
+          const s = window.localStorage;
+          return s;
+        } catch {
+          return {
+            getItem: () => "",
+            setItem: () => true,
+          };
+        }
+      }
+
+      async initData(data) {
+        return data;
+      }
+
+      async start() {
+        console.log("start");
+      }
+
+      async pause() {
+        console.log("pause");
+      }
+
+      async resume() {
+        console.log("pause");
+      }
+
+      async stop() {
+        console.log("stop");
+      }
+    }
+
+    window.onload = async () => {
+      let currentClass = App;
+      while (true) {
+        let baseClass = Object.getPrototypeOf(currentClass);
+        if (
+          !baseClass ||
+          Object.getPrototypeOf(Object) === Object.getPrototypeOf(currentClass)
+        ) {
+          break;
+        }
+        currentClass = baseClass;
+      }
+      Object.setPrototypeOf(currentClass.prototype, AppBase.prototype);
+      for (const template of document.querySelectorAll(
+        "template[id][view-model]"
+      )) {
+        const tagName = template.getAttribute("id");
+        if (!tagName) {
+          continue;
+        }
+        const codeBehind = template.getAttribute("view-model");
+        registerElement(tagName, codeBehind);
+      }
+      delayDispatcher.start();
+    };
+  </script>
+
+  <style>
+    html,
+    body {
+      height: 100%;
+      margin: 0;
+    }
+  </style>
+
+  <body>
+    <app-main></app-main>
+
+    <template id="h-stack" view-model>
+      <slot></slot>
+      <style>
+        :host {
+          display: flex;
+          flex-direction: row;
+        }
+      </style>
+    </template>
+    <template id="v-stack" view-model>
+      <slot></slot>
+      <style>
+        :host {
+          display: flex;
+          flex-direction: column;
+        }
+      </style>
+    </template>
+    <template id="hv-stack" view-model>
+      <slot></slot>
+      <style>
+        :host {
+          display: flex;
+          flex-direction: column;
+        }
+
+        @media (orientation: landscape) {
+          :host {
+            flex-direction: row;
+          }
+        }
+      </style>
+    </template>
+
+    <template id="vh-stack" view-model>
+      <slot></slot>
+      <style>
+        :host {
+          display: flex;
+          flex-direction: row;
+        }
+
+        @media (orientation: landscape) {
+          :host {
+            flex-direction: column;
+          }
+        }
+      </style>
+    </template>
+
+    <template id="h-square" view-model>
+      <slot></slot>
+      <style>
+        :host {
+          width: 100vw;
+          height: 100vw;
+        }
+
+        @media (orientation: landscape) {
+          :host {
+            width: 100vh;
+            height: 100vh;
+          }
+        }
+      </style>
+    </template>
+
+    <template id="h-spacer" view-model>
+      <slot></slot>
+      <style>
+        :host {
+          flex: 1;
+          display: flex;
+        }
+      </style>
+    </template>
+
+    <template id="h-text" view-model>
+      <span inner-text$.="content"></span>
+      <style>
+        :host {
+          flex: 1;
+          display: flex;
+          align-items: center;
+          place-content: center;
+        }
+      </style>
+    </template>
+
+    <template id="play-button" view-model>
+      <span id="btnPlay" class="play-button" class-pause.="isPlaying"></span>
+      <style>
+        :host {
+          display: block;
+          border-radius: 5px;
+          padding: 3px 10px;
+          background-color: #fff4;
+        }
+
+        .play-button {
+          display: block;
+          width: 100%;
+          height: 100%;
+          background-color: var(--color);
+          clip-path: polygon(25% 10%, 25% 90%, 95% 50%, 25% 10%);
+          transition: 200ms all ease-in-out;
+        }
+
+        .play-button.pause {
+          clip-path: polygon(
+            60% 50%,
+            20% 20%,
+            20% 80%,
+            60% 50%,
+            60% 80%,
+            80% 80%,
+            80% 20%,
+            60% 20%
+          );
+        }
+      </style>
+    </template>
+
+    <template id="menu-bar" view-model>
+      <h-stack>
+        <div class-hidden.="!item.show" class="menu-item" for.="item of menus">
+          <span inner-text$.="item.name" onclick.="item.onclick()"></span>
+        </div>
+      </h-stack>
+      <style>
+        :host {
+          display: block;
+        }
+
+        h-stack {
+          overflow: hidden;
+        }
+
+        .menu-item {
+          margin: 5px;
+          background-color: var(--menu-background-color);
+          border-radius: 4px;
+          padding: 2px 5px;
+          color: var(--menu-color);
+          display: flex;
+          justify-content: center;
+          flex: 1;
+        }
+
+        .menu-item > span {
+          display: block;
+          text-overflow: ellipsis;
+          white-space: pre;
+          overflow: hidden;
+          max-width: 6em;
+        }
+
+        .hidden {
+          display: none;
+        }
+      </style>
+    </template>
+
+    <script>
+      class MenuItem {
+        constructor(name = "", onclick = null, show = true) {
+          registerProperties(this, "name", "show");
+          this.name = name;
+          this.show = show;
+          this.onclick = onclick;
+        }
+      }
+    </script>
+
+    <template id="modal-panel" view-model="Modal">
+      <div>
+        <span
+          class="toastMessage"
+          if.="toastMessage"
+          inner-text$.="toastMessage"
+        ></span>
+        <div if.="open" class="modal-wraper" onclick.="close()">
+          <div class="modal" onclick="event.stopPropagation()">
+            <div class="title">
+              <span inner-text$.="title"></span>
+            </div>
+            <div class="body">
+              <div if.="items?.length">
+                <div
+                  class="item"
+                  for.="item of items"
+                  class-highlight.="item === selectedItem"
+                  onclick.="close(item)"
+                >
+                  <span
+                    inner-text$.="options.itemName?item[options.itemName]:item"
+                  ></span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <style>
+        .hidden {
+          /* left: -100%; */
+          /* transition: ease-in-out 0.05s left; */
+          display: none;
+        }
+
+        .toastMessage {
+          color: var(--toast-color, #eee);
+          background-color: var(--toast-background-color, #0008);
+          position: fixed;
+          bottom: 0;
+          margin: 20px auto;
+          left: 50%;
+          transform: translate(-50%, 0);
+          padding: 5px 20px;
+          border-radius: 4px;
+          text-align: center;
+          backdrop-filter: blur(5px);
+        }
+
+        .modal-wraper {
+          position: absolute;
+          top: 0;
+          left: 0;
+          width: 100%;
+          height: 100%;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+        }
+
+        .modal {
+          background: #fff;
+          border-radius: 10px;
+          padding: 10px;
+          width: 90%;
+          max-height: 90%;
+          box-shadow: 3px 3px 5px;
+        }
+
+        .modal .title {
+          font-size: large;
+          margin: 5px 0;
+          font-weight: bold;
+        }
+
+        .modal .body {
+          margin: 5px 0;
+        }
+
+        .modal .foot {
+          margin: 5px 0;
+        }
+
+        .item {
+          margin: 8px 0;
+          background: #0002;
+          padding: 5px;
+          border-radius: 8px;
+        }
+
+        .item.highlight {
+          background: #0008;
+          color: white;
+        }
+      </style>
+    </template>
+    <script>
+      class Modal {
+        constructor() {
+          /**@type { Object.<string,HTMLElement> } */
+          this.components;
+          /**@type { Storage | {  } } */
+          this.storage;
+          registerProperties(
+            this,
+            "toastMessage",
+            "title",
+            "items",
+            "selectedItem",
+            "open",
+            "options"
+          );
+        }
+        toast(/**@string */ msg, /**@type number */ timeout = 1000, task) {
+          return new Promise(async (resolve) => {
+            this.toastMessage = msg;
+            await task;
+            setTimeout(() => {
+              this.toastMessage = null;
+              resolve();
+            }, timeout);
+          });
+        }
+
+        close(result) {
+          if (!this.resolveTask) {
+            return;
+          }
+          if (this.options.requilred && !result) {
+            return;
+          }
+          this.open = undefined;
+          this.resolveTask.resolve(result);
+        }
+
+        select(
+          /** @type string */ msg,
+          /** @type [any] */ values = [],
+          defaultIdx = 0,
+          opt = undefined
+        ) {
+          if (this.resolveTask) {
+            const { resolve, reject } = this.resolveTask;
+            this.resolveTask = undefined;
+            reject();
+          }
+          this.title = msg;
+          this.items = values;
+          this.selectedItem = values[defaultIdx];
+          this.options = opt || {};
+          this.open = true;
+          return new Promise(
+            (resolve, reject) => (this.resolveTask = { resolve, reject })
+          );
+        }
+      }
+    </script>
+    <template id="pop-up" view-model="Popup">
+      <div class="popup">
+        <slot></slot>
+      </div>
+      <style>
+        :host {
+          display: block;
+          position: relative;
+          left: 0;
+          top: 0;
+          bottom: 0;
+          right: 0;
+          position: fixed;
+          background: #0008;
+          backdrop-filter: blur(5px);
+        }
+
+        .popup {
+          max-width: 99%;
+          max-height: 99%;
+          position: absolute;
+          top: 50%;
+          left: 50%;
+          transform: translate(-50%, -50%);
+        }
+      </style>
+    </template>
+    <script>
+      class Popup {}
+    </script>
+  </body>
+</html>

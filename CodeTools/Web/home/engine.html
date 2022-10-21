@@ -1,0 +1,336 @@
+<html>
+<meta charset="utf-8" />
+<div id="containerWraper"></div>
+<div id="menuContainer"></div>
+<style>
+    body {
+        margin: 0;
+    }
+
+    #menuContainer {
+        position: fixed;
+        bottom: 20px;
+        left: 50%;
+        transform: translate(-50%, 0);
+        z-index: 1;
+        display: none;
+    }
+
+    #menuContainer.show {
+        display: flex;
+    }
+
+    .menu {
+        background: #fff8;
+        border-radius: 50%;
+        display: grid;
+        place-content: center;
+        width: 32px;
+        height: 32px;
+        box-shadow: 1px 1px 2px;
+        backdrop-filter: blur(1px);
+        margin: 10px;
+    }
+
+    .menu .icon {}
+
+    .menu .args {}
+</style>
+<script type="module">
+    (async () => {
+        const menuContainer = document.getElementById('menuContainer')
+        const updateMenus = (menus) => {
+            for (let info of menus) {
+                const { icon, args, onclick } = info
+                const menu = document.createElement('div')
+                menu.classList.add('menu')
+                menu.onclick = onclick
+                const iconEle = document.createElement('div')
+                iconEle.classList.add('icon')
+                iconEle.innerText = icon
+                menu.appendChild(iconEle)
+                // const argsEle = document.createElement('args')
+                // argsEle.classList.add('args')
+                // argsEle.innerText = args
+                // menu.appendChild(argsEle)
+                menuContainer.appendChild(menu)
+            }
+        }
+        const sleep = (timeout) => new Promise(resolve => setTimeout(resolve, timeout))
+        const [shellName, appName] = window.location.hash.replace(/^#/, '').split('_')
+        let loadShell, ToolApp
+        try {
+            const maxWait = 10 * 1000
+            const [shellModule, appModule] = await Promise.race([
+                sleep(maxWait).then(() => []),
+                Promise.all([
+                    import(`./shells/${shellName}.js`),
+                    import(`./apps/${appName}.js`)
+                ])
+            ])
+            loadShell = shellModule?.loadShell
+            ToolApp = appModule?.ToolApp
+        } catch (e) {
+            console.log(e)
+        }
+        const objToString = obj => {
+            if (obj?.toText) {
+                return obj.toText()
+            }
+            if (obj) {
+                switch (typeof (obj)) {
+                    case 'string':
+                        return obj
+                    case 'object':
+                        return obj.toString()
+                    case 'array':
+                        return `Array[${obj.length}]`
+                    default: break
+                }
+            }
+            return JSON.stringify(obj)
+        }
+        const write = (result) => {
+            window.parent.postMessage({
+                result
+            }, "*")
+        }
+
+        const AsyncFunction = (async function () { }).constructor;
+        const shadow = document.getElementById('containerWraper').attachShadow({ mode: "open" });
+        document.head.appendChild = (...args) => {
+            shadow.appendChild(...args)
+        }
+        const container = document.createElement('div')
+        const containerStyle = document.createElement('link')
+        container.classList.add('container')
+        containerStyle.rel = 'stylesheet'
+        containerStyle.href = `./apps/${appName}.css`
+        shadow.appendChild(container)
+        shadow.appendChild(containerStyle)
+        let shell = undefined, tryInit = undefined
+        window.addEventListener('message', async (ev) => {
+            if (ev.source !== window.parent) {
+                return
+            }
+            const { taskId, source, powerOn, powerOff, event, value } = ev.data
+            if (event) {
+                switch (event) {
+                    case 'fullscreen':
+                        if (value) {
+                            menuContainer.classList.add('show')
+                        } else {
+                            menuContainer.classList.remove('show')
+                        }
+                        return
+                    default:
+                        return
+                }
+                return
+            }
+            const returnMessage = (result, fId) => {
+                window.parent.postMessage({
+                    taskId,
+                    fId,
+                    result
+                }, "*")
+            }
+            if (!loadShell || !ToolApp) {
+                await returnMessage(`未知脚本${shellName}或应用${appName}`)
+                return
+            }
+            if (powerOff) {
+                returnMessage(undefined)
+                return
+            }
+
+            if (!await tryInit()) {
+                returnMessage('Inner Error.', 2)
+                return
+            }
+            if (powerOn) {
+                returnMessage(undefined, -1)
+                return
+            }
+            const getStatStr = () => {
+                if (showStat) {
+                    const { time, codeLength, success, bestCodeLength } = showStat
+                    showStat = undefined
+                    let bestCodeLengthStr = ''
+                    if (bestCodeLength) {
+                        bestCodeLengthStr = '\n    最短' + (bestCodeLength === codeLength ? '' : `: ${bestCodeLength}`)
+                    }
+                    return `\n\n统计:\n    状态: ${success ? '成功' : '失败'}\n    耗时: ${new Date(time + 16 * 60 * 60 * 1000).toLocaleTimeString()}\n    代码: ${codeLength}${bestCodeLengthStr}\n`
+                }
+                return ''
+            }
+            try {
+                const noValue = {}
+                sessionCodeLength += source.trim().length + 1
+                let success = true, res = undefined
+                res = await shell.eval(source, noValue);
+                if (res?.apiResult) {
+                    [success, res] = res.apiResult
+                }
+                if (noValue === res) {
+                    const statStr = getStatStr()
+                    if (statStr) {
+                        returnMessage(statStr)
+                    } else {
+                        returnMessage(undefined, -1)
+                    }
+                } else {
+                    returnMessage(await (objToString(res)) + getStatStr(), success ? 1 : 2)
+                }
+
+            } catch (e) {
+                returnMessage(objToString(e) + '\n' + getStatStr(), 2)
+            }
+        })
+        window.parent.postMessage({
+            inited: true
+        }, "*")
+        if (!loadShell || !ToolApp) {
+            return
+        }
+        let sessionStartTime = undefined
+        let sessionCodeLength = undefined
+        let showStat = undefined
+        let bestCodeLength = undefined
+        const sessionStart = (clear) => {
+            if (clear) {
+                bestCodeLength = undefined
+            }
+            sessionStartTime = Date.now()
+            sessionCodeLength = 0
+        }
+        const sessionStop = async (success) => {
+            const time = Date.now() - sessionStartTime
+            const codeLength = sessionCodeLength
+            if (success) {
+                bestCodeLength = bestCodeLength === undefined ? codeLength : Math.min(codeLength, bestCodeLength)
+            }
+            showStat = { success, time, codeLength, bestCodeLength }
+        }
+        const executeSnips = (snips) => {
+            window.parent.postMessage({
+                snips
+            }, "*")
+        }
+        const setFullScreen = (fullscreen) => {
+            window.parent.postMessage({
+                fullscreen
+            }, "*")
+        }
+        const toolApp = new ToolApp({ container, sessionStart, sessionStop, executeSnips })
+        window.toolApp = toolApp
+        let inited = false
+        const menus = [{ icon: '⌨️', args: '', onclick: () => setFullScreen(false) }]
+        const defaultRevDefine = (f, args) => {
+            let exp = f + '('
+            for (let a of args) {
+                exp += JSON.stringify(a)
+            }
+            exp += ')'
+            return exp
+        }
+        const loadShellTask = loadShell({ toolApp, write }).then(async shell => {
+            await toolApp.init?.({ shell, shellName })
+            const apiPrefix = '$'
+            toolApp['$sleep'] = toolApp['$sleep'] || async function (desc, apiName, time, ...args) {
+                time = parseInt(time)
+                if (desc || !(time >= 0) || args.length) {
+                    return [false, `休息\n签名 ${apiName}(<time毫秒>)\n`]
+                }
+                await sleep(time)
+                return [true]
+            }
+            const apiNames = ['$help', '$sleep', ...Object.getOwnPropertyNames(Object.getPrototypeOf(toolApp)).filter(n => n.startsWith(apiPrefix)).sort()]
+                .map(jName => [jName, jName.slice(apiPrefix.length)])
+
+            let apiDescs = []
+            const helpApis = apiNames.filter(([jName]) => jName !== '$help')
+            const maxNameLength = Math.max(...helpApis.map(i => i[1].length))
+            for (let i = 0; i < helpApis.length; i++) {
+                const [jName, pName] = helpApis[i]
+                const desc = await toolApp[jName](true, pName)
+                const revDefine = shell.revDefine || defaultRevDefine
+                for (let { icon, args } of (desc[2] || [])) {
+                    args = args || []
+                    menus.push({
+                        icon, args: args.map(a => a, toString()).join(''),
+                        onclick: () => {
+                            executeSnips(revDefine(pName, args))
+                        }
+                    })
+                }
+                apiDescs.push("*".padStart(5) + ' ' + (pName + ':').padEnd(maxNameLength + 1) + ' ' + desc[1].split('\n')[0] || '')
+            }
+            updateMenus(menus)
+            apiDescs = apiDescs.join('\n')
+            toolApp.$help = async function (desc, apiName, name) {
+                const jName = '$' + name
+                if (this[jName]) {
+                    return await this[jName](true, name)
+                }
+                return [true, `显示函数帮助\n签名: ${apiName || 'help'}(<apiName>)\n` + apiDescs]
+            }
+            let callingApi = undefined
+            let callingTask = Promise.resolve(0)
+            for (const [jName, pName] of apiNames) {
+                const f = async (sync, apiName, ...args) => {
+                    const call = async () => {
+                        const apiResult = await toolApp[jName](undefined, apiName, ...args)
+                        callingApi = undefined
+                        return { apiResult }
+                    }
+                    if (sync) {
+                        return await new Promise(resolve => {
+                            callingTask = callingTask.then(async () => {
+                                resolve(await call())
+                            })
+                        })
+                    } else {
+                        if (callingApi) {
+                            return `等待${callingApi}结束`
+                        }
+                        callingApi = apiName
+
+                        const callRes = call()
+                        return await callRes
+                    }
+                }
+                const text = await toolApp[jName](true, pName)
+                for (let [sync, apiName] of [[0, 'a' + pName], [1, pName], [1, pName[0]]]) {
+                    const api = (...args) => f(sync, apiName, ...args)
+                    api.toText = () => text
+                    shell.define(apiName, api)
+                }
+            }
+            return shell
+        });
+        tryInit = async () => {
+            if (inited) {
+                return true
+            }
+            shell = await loadShellTask
+            window.shell = shell
+            const console_ = window.console
+            const console = Object.assign({}, console_)
+            window.console = console
+            for (let fn of ['log']) {
+                console[fn] = async (...args) => {
+                    console_[fn](...args)
+                    for (let arg of args) {
+                        await write(objToString(arg))
+                    }
+                }
+            }
+            await write(`脚本:${shellName}\n${shell.welcome || ''}\n应用:${toolApp.name || appName}\n${toolApp.welcome || ''}\n`)
+            inited = true
+            return true
+        }
+    })()
+</script>
+
+</html>

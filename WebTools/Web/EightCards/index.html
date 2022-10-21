@@ -1,0 +1,1966 @@
+<html>
+  <meta charset="utf-8" />
+
+  <script>
+    const Api = {
+      appService: window.os.app,
+      localStorage: window.os.localStorage,
+    };
+
+    class App {
+      constructor() {
+        /** @type { Object.<string,HTMLElement> } */
+        this.components;
+        registerProperties(
+          this,
+          "players",
+          "controller",
+          "totalScore",
+          "playing",
+          "autoplay",
+          "splayer",
+          "eplayer",
+          "nplayer",
+          "wplayer",
+          "gridplayers"
+        );
+      }
+
+      async start() {
+        /** @type { { toast:(msg:string, timeout:number = 1000)=>Promise<any> } } */
+        this.modal_ = this.components.modal.model;
+        this.localStorage = Api.localStorage;
+        this.appService = Api.appService;
+        this.totalScore = 0;
+        try {
+          this.totalScore =
+            JSON.parse(await this.localStorage.getItem("totalScore")) || 0;
+        } catch {
+          //ignore
+        }
+        this.controller = new Controller();
+        this.players = [
+          new FoolPlayer(0, 4),
+          new FoolPlayer(-1, 4),
+          new FoolPlayer(1, 4),
+          this.controller,
+        ];
+        this.gridplayers = [];
+        this.autoplay = false;
+        this.players = this.players.shuffle();
+        for (let i = 0; i < this.players.length; i++) {
+          const player = this.players[i];
+          player.order = i;
+        }
+        this.splayer = this.controller;
+        this.wplayer = this.players[
+          (this.splayer.order + 1) % this.players.length
+        ];
+        this.nplayer = this.players[
+          (this.splayer.order + 2) % this.players.length
+        ];
+        this.eplayer = this.players[
+          (this.splayer.order + 3) % this.players.length
+        ];
+        this.gridplayers = [
+          undefined,
+          this.nplayer,
+          undefined,
+          this.wplayer,
+          undefined,
+          this.eplayer,
+          undefined,
+          this.splayer,
+          undefined,
+        ];
+        await this.play();
+      }
+
+      toogleAutoplay() {
+        this.autoplay = !this.autoplay;
+        this.controller.setAutoplay(this.autoplay);
+        if (this.autoplay && (!this.game || this.game.gameStatus.finished)) {
+          this.play();
+        }
+      }
+
+      async restart() {
+        await this.play();
+      }
+
+      close() {
+        this.appService.close();
+      }
+
+      async play() {
+        await this.modal_.toast("开始");
+        this.playing = true;
+        this.game = new Game(this.players);
+        await this.game.play();
+        const winner = this.game.gameStatus.loops[
+          this.game.gameStatus.loops.length - 1
+        ].maxTurn.player;
+        const isWinner = winner == this.controller;
+        let score = 0;
+        if (isWinner) {
+          score = this.controller.winedCards.size + 1;
+        } else {
+          score = this.controller.winedCards.size - 3;
+        }
+        this.totalScore += score;
+        await this.localStorage.setItem(
+          "totalScore",
+          JSON.stringify(this.totalScore)
+        );
+        this.playing = false;
+        await this.modal_.toast(`本局得分: ${score}`, 2000);
+        if (this.autoplay) {
+          await this.play();
+        }
+      }
+
+      send(hidden) {
+        if (!this.game || this.game.gameStatus.finished) {
+          return this.play();
+        }
+        this.controller.send(hidden);
+      }
+    }
+
+    class Game {
+      constructor(/** @type {Player[]} */ players) {
+        this.allPlayers = players;
+      }
+      async play() {
+        this.gameStatus = new GameStatus();
+        /**@type {Card[]} */
+        this.cards = this.gameStatus.allCards.shuffle();
+        /**@type {Player[]} */
+        this.players = this.allPlayers; //.shuffle()
+        const cardsPerPlayer = this.cards.length / this.players.length;
+        for (let i = 0; i < this.players.length; i++) {
+          const player = this.players[i];
+          player.wins = [];
+          player.isCurrent = false;
+          await player.receiveCards(
+            this.cards.slice(i * cardsPerPlayer, (i + 1) * cardsPerPlayer),
+            this.gameStatus
+          );
+        }
+        let startPlayer = 0;
+        let loopCount = -1;
+        while (true) {
+          if (this.players[startPlayer].cards.length <= 0) {
+            break;
+          }
+          loopCount++;
+          console.log(`----------${loopCount}----------\n`);
+          let loop = new GameLoop(this.gameStatus.loops.length);
+          this.gameStatus.loops.push(loop);
+          let maxTurn = undefined;
+          for (let i = 0; i < this.players.length; i++) {
+            const player = this.players[
+              (i + startPlayer) % this.players.length
+            ];
+            player.isCurrent = true;
+            const [cards, hidden] = await player.sendCards(loop);
+            if (cards.length <= 0) {
+              throw "";
+            }
+            if (
+              maxTurn !== undefined &&
+              maxTurn.cards.length !== cards.length
+            ) {
+              throw "";
+            }
+            if (!hidden) {
+              const cardValues = new Set(cards.map((c) => c.value));
+              if (cardValues.size != 1) {
+                throw "";
+              }
+            }
+            player.removeCards(cards, hidden);
+            const turn = { player, cards };
+            loop.turns.push(turn);
+            if (maxTurn == undefined) {
+              maxTurn = turn;
+            } else if (!hidden && cards[0].value > maxTurn.cards[0].value) {
+              maxTurn = turn;
+            }
+            loop.maxTurn = maxTurn;
+            if (hidden) {
+              console.log(`\tPlayer[${player.id}]: Pass`);
+            } else {
+              console.log(
+                `\tPlayer[${player.id}]:${cards
+                  .map((c) => c.type + c.value)
+                  .join("")}`
+              );
+            }
+            player.isCurrent = false;
+          }
+          startPlayer = maxTurn.player.order;
+          maxTurn.player.winCards(maxTurn.cards);
+          console.log(`Player[${maxTurn.player.id}] Ahead`);
+        }
+        const winner = this.gameStatus.loops[this.gameStatus.loops.length - 1]
+          .maxTurn.player;
+        for (let player of this.players) {
+          if (winner == player) {
+            console.log(`Player[${player.id}]: ${player.winedCards.size + 1}`);
+          } else {
+            console.log(`Player[${player.id}]: ${player.winedCards.size - 3}`);
+          }
+        }
+        this.gameStatus.finished = true;
+      }
+    }
+
+    class GameLoop {
+      constructor(idx) {
+        /**@type {number} */
+        this.idx = idx;
+        /**@type {{player:Player, cards: Card[]}[]} */
+        this.turns = [];
+        /**@type {{player:Player, cards: Card[]}} */
+        this.maxTurn;
+      }
+    }
+
+    class GameStatus {
+      constructor() {
+        this.finished = false;
+        /**@type {GameLoop[]} */
+        this.loops = [];
+        this.allCards = Array.from({ length: 7 }, (_, i) =>
+          Array.from(CardTypes, (t) => new Card(i + 1, t))
+        )
+          .concat(
+            Array.from({ length: 2 }, (_, i) =>
+              Array.from(
+                [CardType.Heart, CardType.Diamond],
+                (t) => new Card(i + 8, t)
+              )
+            )
+          )
+          .flat();
+      }
+    }
+
+    const CardType = {
+      Spade: "♠️",
+      Heart: "♥️",
+      Club: "♣️",
+      Diamond: "♦️",
+    };
+
+    const CardTypes = [
+      CardType.Heart,
+      CardType.Spade,
+      CardType.Club,
+      CardType.Diamond,
+    ];
+    function shuffle() {
+      let i = this.length;
+      while (i) {
+        let j = Math.floor(Math.random() * i--);
+        [this[j], this[i]] = [this[i], this[j]];
+      }
+      return this;
+    }
+    Array.prototype.shuffle = shuffle;
+    class Card {
+      constructor(value, type) {
+        /** @type {number} */
+        this.value = value;
+        /** @type {String} */
+        this.type = type;
+        registerProperties(this, "isSelected");
+      }
+    }
+
+    class Player {
+      constructor() {
+        /**@type {number} */
+        this.id = Player.count || 1;
+        Player.count = this.id + 1;
+        this.order = 0;
+        registerProperties(
+          this,
+          "cards",
+          "sendedCards",
+          "winedCards",
+          "isCurrent"
+        );
+        this.winedCards = new Set();
+      }
+      async receiveCards(
+        /** @type {Card[]} */ cards,
+        /** @type {GameStatus} */ gameStatus
+      ) {
+        this.cards = cards;
+        this.winedCards = new Set();
+        /** @type {[Card, boolean][]} */
+        this.sendedCards = [];
+        this.gameStatus = gameStatus;
+        return;
+      }
+
+      removeCards(/** @type {Card[]} */ cards, /**@type {boolean} */ hidden) {
+        const cardSet = new Set(cards);
+        this.cards = this.cards.filter((c) => !cardSet.has(c));
+        this.sendedCards = [
+          ...this.sendedCards,
+          ...cards.map((c) => [c, hidden]),
+        ];
+      }
+
+      winCards(/** @type {Card[]} */ cards) {
+        cards.forEach((c) => this.winedCards.add(c));
+        this.sendedCards = [...this.sendedCards];
+      }
+
+      /**@returns {[Card[], boolean]}  */
+      async sendCards(/** @type {GameLoop} */ loop) {
+        throw "";
+      }
+    }
+
+    class FoolPlayer extends Player {
+      constructor(strategy = 0, playerCount) {
+        super();
+        this._strategy = strategy;
+        this._playerCount = playerCount;
+      }
+
+      positiveStrategy() {
+        if (this._strategy > 0) {
+          return true;
+        }
+        if (this._strategy < 0) {
+          return false;
+        }
+        return Math.random() > 0.5;
+      }
+
+      async receiveCards(
+        /** @type {Card[]} */ cards,
+        /** @type {GameStatus} */ gameStatus
+      ) {
+        super.receiveCards(cards, gameStatus);
+        this.group();
+      }
+
+      group() {
+        this.cards = this.cards.sort((i, j) => i.value - j.value);
+        let groups = {};
+        for (let card of this.cards) {
+          groups[card.value] = groups[card.value] || [];
+          groups[card.value].push(card);
+        }
+        this.groups = Object.keys(groups)
+          .map((g) => groups[g])
+          .filter((g) => g && g.length)
+          .sort((i, j) => i[0].value - j[0].value);
+      }
+
+      removeCards(/** @type {Card[]} */ cards, /**@type {boolean} */ hidden) {
+        super.removeCards(cards, hidden);
+        this.group();
+      }
+
+      /**@returns {[Card[], boolean]}  */
+      async sendCards(/** @type {GameLoop} */ loop, thinking = true) {
+        if (thinking) {
+          await sleep(Math.floor(Math.random() * 1000));
+        }
+        let positiveStrategy = this.positiveStrategy();
+        if (loop.turns.length == 0) {
+          return [
+            this.groups[positiveStrategy ? this.groups.length - 1 : 0],
+            false,
+          ];
+        }
+        const count = loop.maxTurn.cards.length;
+        const groups = this.groups.filter(
+          (g) => g[0].value > loop.maxTurn.cards[0].value && g.length >= count
+        );
+        const group =
+          groups[
+            positiveStrategy && loop.turns.length !== this._playerCount - 1
+              ? groups.length - 1
+              : 0
+          ];
+        if (group !== undefined) {
+          return [group.slice(0, count), false];
+        }
+        return [this.cards.slice(0, count), true];
+      }
+    }
+
+    class Controller extends FoolPlayer {
+      constructor() {
+        super(-1, 4);
+        // registerProperties(this, 'cards', 'sendedCards', 'winedCards', 'isCurrent')
+        this.resolveSend;
+        this.autoplay = false;
+      }
+
+      async setAutoplay(autoplay) {
+        this.autoplay = autoplay;
+        if (this.autoplay && this.resolveSend && this.currentLoop) {
+          const [selected, hidden] = await super.sendCards(
+            this.currentLoop,
+            false
+          );
+          const r = this.resolveSend;
+          this.resolveSend = undefined;
+          r([selected, hidden]);
+        }
+      }
+      async receiveCards(
+        /** @type {Card[]} */ cards,
+        /** @type {GameStatus} */ gameStatus
+      ) {
+        super.receiveCards(cards, gameStatus);
+        this.cards = this.cards.sort((i, j) => i.value - j.value);
+        this.cards.forEach((c) => (c.isSelected = undefined));
+      }
+      /**@returns {[Card[], boolean]}  */
+      async sendCards(/** @type {GameLoop} */ loop) {
+        if (this.autoplay) {
+          return await super.sendCards(loop, false);
+        }
+        this.currentLoop = loop;
+        let idx = this.cards.findIndex((c) => c.isSelected);
+        if (idx < 0) {
+          const [selected, _] = await super.sendCards(loop, false);
+          selected.forEach((c) => (c.isSelected = true));
+        }
+        return new Promise((resolve) => (this.resolveSend = resolve));
+      }
+
+      toggleCard(card) {
+        if (card.isSelected) {
+          card.isSelected = undefined;
+          return;
+        }
+        if (!this.currentLoop) {
+          card.isSelected = true;
+          return;
+        }
+        if (this.currentLoop.turns.length) {
+          if (this.currentLoop.maxTurn.cards.length == 1) {
+            this.cards.forEach(
+              (c) => (c.isSelected = card === c ? true : undefined)
+            );
+          } else {
+            card.isSelected = !card.isSelected;
+          }
+        } else {
+          this.cards.forEach(
+            (c) => (c.isSelected = card.value === c.value ? true : undefined)
+          );
+        }
+      }
+
+      send(hidden = false) {
+        if (!this.currentLoop) {
+          return;
+        }
+        const send = (hidden = false) => {
+          const r = this.resolveSend;
+          this.resolveSend = undefined;
+          r([selected, hidden]);
+        };
+
+        let selected = this.cards.filter((c) => c.isSelected);
+        if (selected.length <= 0) {
+          return;
+        }
+        let values = new Set(selected.map((c) => c.value));
+        if (this.currentLoop.turns.length === 0 && values.size === 1) {
+          send();
+          return;
+        }
+
+        if (selected.length !== this.currentLoop.maxTurn.cards.length) {
+          return;
+        }
+        hidden =
+          hidden ||
+          values.size != 1 ||
+          selected[0].value <= this.currentLoop.maxTurn.cards[0].value;
+        send(hidden);
+      }
+    }
+  </script>
+  <template id="app-main" view-model="App">
+    <!-- <div inner-text$.="title"></div> -->
+    <div class="app">
+      <div class="table">
+        <div class="grid">
+          <div class="player" for.="player of gridplayers">
+            <div if.="player">
+              <div class-current.="player.isCurrent">
+                <div class="cards sendedCards">
+                  <div for.="s of player.sendedCards">
+                    <div
+                      class="card"
+                      class-hidden.="s[1]"
+                      class-controller.="player === controller"
+                      class-wined.="player.winedCards.has(s[0])"
+                    >
+                      <span inner-text$.="s[0].type"></span>
+                      <span inner-text$.="s[0].value"></span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div if.="controller == player">
+                <div class="cards holdcards">
+                  <div for.="card of player.cards">
+                    <div
+                      class="card"
+                      class-selected.="card.isSelected"
+                      onclick.="player.toggleCard(card)"
+                    >
+                      <span inner-text$.="card.type"></span>
+                      <span inner-text$.="card.value"></span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="buttons">
+          <input type="button" onclick.="close()" value="退出" />
+          <input type="button" disabled value.="'总分: ' + totalScore" />
+          <input
+            if.="playing"
+            type="button"
+            onclick.="restart()"
+            value="重来"
+          />
+          <input
+            type="button"
+            onclick.="toogleAutoplay()"
+            value.="autoplay ? '关闭托管':'开始托管'"
+          />
+          <input
+            if.="playing && !autoplay"
+            type="button"
+            onclick.="send(true)"
+            value="要不起"
+          />
+          <input
+            if.="!autoplay"
+            type="button"
+            onclick.="send()"
+            value.="playing ? '出牌':'开始'"
+          />
+        </div>
+      </div>
+    </div>
+    <modal-panel id="modal"></modal-panel>
+    <style>
+      :host {
+        display: block;
+      }
+
+      .table {
+        display: flex;
+        flex-direction: column;
+        height: 100vw;
+        width: 100vw;
+        position: absolute;
+        top: 50%;
+        transform: translate(0, -50%);
+        font-family: Chalkduster;
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: auto 1fr auto;
+        grid-template-rows: auto 1fr auto;
+        flex: 1;
+      }
+
+      .app {
+      }
+
+      .player {
+        font-size: small;
+        margin-bottom: 0.4em;
+      }
+
+      .grid > .player:nth-child(4) > div,
+      .grid > .player:nth-child(6) > div {
+        flex: 1;
+        display: flex;
+      }
+
+      .grid > .player:nth-child(4) > div > div,
+      .grid > .player:nth-child(6) > div > div {
+        display: flex;
+        flex: 1;
+      }
+
+      .holdcards {
+        font-size: initial;
+      }
+
+      .cards {
+        display: flex;
+        flex-direction: row;
+        height: 3em;
+        margin-bottom: 1px;
+      }
+
+      .sendedCards {
+        /* font-size: x-small; */
+        /* margin: 0.2em 0; */
+        justify-items: center;
+      }
+
+      .card {
+        border: 1px solid #198754c0;
+        border-radius: 4px;
+        width: 1.95em;
+        height: 2.8em;
+        display: flex;
+        align-items: center;
+        background: #fff;
+        justify-content: center;
+        margin-left: 1px;
+        display: flex;
+        flex-direction: column;
+        justify-content: space-around;
+        /* box-sizing: border-box; */
+      }
+
+      .grid > .player:nth-child(4),
+      .grid > .player:nth-child(6) {
+        display: flex;
+      }
+
+      .grid > .player:nth-child(4) .cards,
+      .grid > .player:nth-child(6) .cards {
+        flex-direction: column;
+        height: unset;
+        width: 3.2em;
+      }
+
+      .grid > .player:nth-child(4) .card,
+      .grid > .player:nth-child(6) .card {
+        height: 1.95em;
+        width: 2.8em;
+        margin-top: 1px;
+        flex-direction: row;
+      }
+
+      .card.hidden {
+        color: transparent;
+        background: yellowgreen;
+      }
+
+      .controller.card.hidden {
+        color: unset;
+      }
+
+      /* .sendedCards .card{
+      background: #eee;
+    }
+
+    .sendedCards  .card.hidden{
+      background: #456456c0;
+    } */
+
+      .card.wined {
+        background: gold;
+        border-color: gold;
+      }
+
+      .card.selected {
+        border-width: 2;
+        border-color: #ffc107;
+        /* border-color: #000; */
+      }
+
+      .sendedCards {
+        background: #74a174;
+        border-radius: 5px;
+        /* padding: 2px 0; */
+      }
+
+      .holdcards .card {
+        width: 2.1em;
+      }
+
+      .current .sendedCards {
+        /* background: #fff6; */
+      }
+
+      .buttons {
+        position: fixed;
+        left: 50%;
+        top: 45%;
+        transform: translate(-50%, -50%);
+        display: flex;
+        flex-direction: column;
+      }
+
+      .buttons input {
+        margin: 3px;
+        font-size: 15px;
+      }
+    </style>
+  </template>
+  <style>
+    body {
+      background-color: #003200;
+      opacity: 0.8;
+      background-image: linear-gradient(
+          #105210 0.7000000000000001px,
+          transparent 0.7000000000000001px
+        ),
+        linear-gradient(
+          to right,
+          #105210 0.7000000000000001px,
+          #003200 0.7000000000000001px
+        );
+      background-size: 14px 14px;
+    }
+  </style>
+  <script>
+    window.appData = window.appData || {
+      DEFAULT_R: 0,
+      RANDOM: false,
+      DATA_PATH: "/V.%E8%A7%86%E9%A2%91/Player/data/crosswords/easy/",
+      APP_NAME: "EasyCross",
+    };
+  </script>
+
+  <meta
+    name="viewport"
+    content="width=device-width, maximum-scale=1.0,user-scalable=no, initial-scale=1"
+  />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="transparent" />
+  <script>
+    const {
+      registerElement,
+      registerProperties,
+      evalInContext,
+      delayDispatcher,
+    } = (() => {
+      const evalInContext = (exp, context) => {
+        return function () {
+          with (this) {
+            try {
+              return eval(`(${exp})`);
+            } catch (e) {
+              console.log(exp);
+              console.log(e);
+              return;
+            }
+          }
+        }.call(context);
+      };
+
+      const removeItem = (item) => {
+        const clearItem = (/**@type {HTMLElement}*/ item) => {
+          for (let c of item.childNodes) {
+            clearItem(c);
+          }
+          let onRemoves = item.onRemoves;
+          item.onRemoves = undefined;
+          if (onRemoves?.length) {
+            onRemoves.forEach((onRemove) => onRemove());
+          }
+        };
+        clearItem(item);
+        item.remove();
+      };
+
+      const onprop = (parent, /**@type {String} */ exp, context, listener) => {
+        const tokens = exp.split(/\.|\?\.|\[|\]/);
+        if (!tokens[1]) {
+          if (context.tmpCtxName === tokens[0]) {
+          } else {
+            context.on && context.on(tokens[0], listener, true, parent);
+            parent.onRemoves = [
+              ...(parent.onRemoves || []),
+              () => {
+                context.off(tokens[0], listener, true);
+              },
+            ];
+          }
+          return;
+        }
+        if (context.tmpCtxName === tokens[0]) {
+          context = context[context.tmpCtxName];
+          tokens.shift();
+        }
+        const clearBind = (current) => {
+          while (current) {
+            if (current.off) {
+              current.off();
+            }
+            const next = current.next;
+            current.next = undefined;
+            current = next;
+          }
+        };
+        const register = (tokens, handler, context, offChain) => {
+          const prop = tokens[0];
+          if (!prop || !context) {
+            return;
+          }
+          offChain.next = {};
+          const registerNext = () => {
+            register(tokens.slice(1), handler, context[prop], offChain.next);
+          };
+          if (context.on && context.on instanceof Function) {
+            const listener = (...args) => {
+              clearBind(offChain.next);
+              offChain.next = {};
+              registerNext();
+              handler(...args);
+            };
+            context.on(prop, listener, true, parent);
+            offChain.off = () => {
+              context.off(prop, listener, true);
+            };
+          }
+          registerNext();
+        };
+        const offChain = {};
+        register(tokens, listener, context, offChain);
+        parent.onRemoves = [
+          ...(parent.onRemoves || []),
+          () => {
+            clearBind(offChain);
+          },
+        ];
+      };
+
+      const bindingForInstruction = (/**@type HTMLElement */ element) => {
+        let forExp = element.getAttribute("for.");
+        const match = forExp.match(
+          /^\s*(((let|const|of)\s+)?(\w+)\s+(of|in)\s+)?\s*(.+)\s*$/
+        );
+        if (!match || !match[6]) {
+          throw new Error("Invalid for Expression");
+        }
+        const collectionName = match[6];
+        const of_in = match[5] || "of";
+        let varName = match[4];
+        let forHead;
+        if (varName) {
+          forHead = `for(const ${varName} ${of_in} ${collectionName})`;
+        } else {
+          varName = "$$i";
+          forHead = `for(const ${varName} of ${collectionName})`;
+        }
+        const comment = document.createComment(element.outerHTML);
+        const parent = element.parentElement;
+        parent.insertBefore(comment, element);
+        element.remove();
+        /**@type Map<any, HTMLElement> */
+        let items = new Map();
+        /**@type Map<any, HTMLElement> */
+        let newItems = new Map();
+        let idx = 0;
+        let allRemoved = false;
+        const update = () => {
+          (function ($$forEach) {
+            newItems = new Map();
+            idx = 0;
+            allRemoved = false;
+            with (this) {
+              eval(`
+          let collection
+          try{
+            collection = this.${collectionName}
+          }
+          catch{
+            //ignore
+          }
+          if (collection) {
+            ${forHead}{
+              $$forEach(${varName})
+              }
+          }`);
+            }
+            for (const [_, { item }] of items) {
+              removeItem(item);
+            }
+            items = newItems;
+          }.call(element.context, ($$i) => {
+            /**@type HTMLElement */
+            let item;
+            if (items.has($$i)) {
+              const pair = items.get($$i);
+              item = pair.item;
+              if (!allRemoved && idx !== pair.idx) {
+                console.log("removed");
+                for (const [_, { item }] of items) {
+                  removeItem(item);
+                }
+                allRemoved = true;
+              }
+              items.delete($$i);
+            } else {
+              item = element.cloneNode(true);
+              item.removeAttribute("id");
+              item.removeAttribute("for.");
+              if (item.updateModel) {
+                item.model = $$i;
+              } else {
+                item.modelBeforeInit = $$i;
+              }
+              const context = Object.create(element.context);
+              context[varName] = $$i;
+              context.tmpCtxName = varName;
+              item.context = context;
+            }
+            parent.insertBefore(item, comment);
+            newItems.set($$i, { idx, item });
+            binding(item);
+            idx++;
+          }));
+        };
+        update();
+        let lastContext = element.context;
+        comment.updateWhenModelChange = () => {
+          if (lastContext === element.context) {
+            return;
+          }
+          lastContext = element.context;
+          update();
+        };
+        onprop(parent, collectionName, element.context, update);
+        return {};
+      };
+
+      const bindingIfInstruction = (
+        /**@type HTMLElement */ element,
+        keyChangeRemove
+      ) => {
+        let ifExp = element.getAttribute("if.");
+        const comment = document.createComment(element.outerHTML);
+        const parent = element.parentElement;
+        parent.insertBefore(comment, element);
+        element.remove();
+        let item;
+        let lastValue;
+        const update = () => {
+          const value = evalInContext(ifExp, element.context);
+          if (keyChangeRemove && value !== lastValue && item) {
+            removeItem(item);
+            item = undefined;
+          }
+          if (value) {
+            if (item) {
+              return;
+            }
+            item = element.cloneNode(true);
+            item.removeAttribute("if.");
+            item.removeAttribute("keyif.");
+            parent.insertBefore(item, comment);
+            item.context = element.context;
+            binding(item);
+          } else if (item) {
+            removeItem(item);
+            item = null;
+          }
+        };
+        update();
+        let lastContext = element.context;
+        comment.updateWhenModelChange = () => {
+          if (lastContext === element.context) {
+            return;
+          }
+          lastContext = element.context;
+          update();
+        };
+        for (const exp of getPropsFromExp(ifExp)) {
+          onprop(parent, exp, element.context, update);
+        }
+        return {};
+      };
+
+      const getPropNameFromBindingAttr = (attr) => {
+        return attr.replace(/-(\w)/g, (_, c) => c.toUpperCase());
+      };
+
+      const getPropsFromExp = (exp) => {
+        return exp.match(/([a-zA-Z0-9_$.\[\]]|\?\.)+/g) || [];
+        // return exp.match(/[a-zA-Z0-9_$.]+/g) || []
+      };
+
+      const bindingAttrs = (/**@type HTMLElement */ element) => {
+        if (element.hasAttribute("for.")) {
+          return bindingForInstruction(element);
+        }
+        if (element.hasAttribute("if.")) {
+          return bindingIfInstruction(element, element.hasAttribute("keyif."));
+        }
+        if (element.updateWhenModelChange) {
+          element.updateWhenModelChange();
+          return element;
+        }
+        const bindingAttrs = element
+          .getAttributeNames()
+          .filter((p) => p.endsWith("."));
+        for (const prop of bindingAttrs) {
+          const $$exp = element.getAttribute(prop);
+          const effectedAttr = prop
+            .slice(0, -".".length)
+            .split(",")
+            .map((a) => a.trim())
+            .filter((a) => a);
+
+          if (effectedAttr.some((a) => a.startsWith("on"))) {
+            const value = `(function($event){with(this){${$$exp}}}).call(event.target.context, event)`;
+            for (const ea of effectedAttr) {
+              if (ea.endsWith("$")) {
+                element.setAttribute(
+                  ea.slice(0, -1),
+                  "event.stopPropagation();" + value
+                );
+              } else {
+                element.setAttribute(ea, value);
+              }
+            }
+            continue;
+          }
+          const update = () => {
+            const value = evalInContext($$exp, element.context);
+            for (const ea of effectedAttr) {
+              if (ea === "model") {
+                if (element.updateModel) {
+                  element.updateModel(value);
+                } else {
+                  element.modelBeforeInit = value;
+                }
+                continue;
+              }
+              if (ea === "focus") {
+                if (value) {
+                  if (element.scrollIntoViewIfNeeded) {
+                    element.scrollIntoViewIfNeeded();
+                  } else {
+                    element.scrollIntoView();
+                  }
+                  element.focus();
+                }
+                continue;
+              }
+              if (ea === "scrollintoview") {
+                if (value) {
+                  if (element.scrollIntoViewIfNeeded) {
+                    element.scrollIntoViewIfNeeded();
+                  } else {
+                    element.scrollIntoView();
+                  }
+                }
+                continue;
+              }
+              if (ea.startsWith("class-")) {
+                const className = ea.slice("class-".length);
+                if (value) {
+                  element.classList.add(className);
+                } else {
+                  element.classList.remove(className);
+                }
+                continue;
+              } else if (ea.startsWith("style-")) {
+                const prop = ea.slice("style-".length, -1);
+                element.style.setProperty(prop, value);
+                continue;
+              }
+              if (ea.endsWith("$")) {
+                let prop = getPropNameFromBindingAttr(ea.slice(0, -1));
+                switch (prop) {
+                  case "innerHtml":
+                    prop = "innerHTML";
+                    break;
+                }
+                element[prop] = value;
+                continue;
+              }
+              if (value === undefined || value === null) {
+                element.removeAttribute(ea);
+              } else if (element[ea] !== value) {
+                element.setAttribute(ea, value);
+              }
+            }
+          };
+          update();
+          for (const exp of getPropsFromExp($$exp)) {
+            onprop(element.parentElement, exp, element.context, update);
+          }
+        }
+        return element;
+      };
+
+      const binding = (/**@type HTMLElement */ element) => {
+        /**@type { Object.<string,HTMLElement> } */
+        const components = element.context.components;
+        if (element.hasAttribute) {
+          const handler = bindingAttrs(element);
+          //collect ids
+          if (element.hasAttribute("id")) {
+            components[element.getAttribute("id")] = handler;
+          }
+          if (handler !== element) {
+            return;
+          }
+        }
+        for (const child of [...element.children]) {
+          if (
+            child.context == element.context ||
+            (child.context &&
+              Object.getPrototypeOf(child.context) === element.context)
+          ) {
+          } else {
+            child.context = element.context;
+          }
+          binding(child);
+        }
+      };
+
+      const getNameFromTagName = (tagName) => {
+        return tagName.replace(/(?:^|-)(\w)/g, (_, c) => c.toUpperCase());
+      };
+
+      class DelayDispatcher {
+        constructor(delay = 50) {
+          this.delay = delay;
+          this.currentTask;
+          this.running = false;
+          this.lastDispatchTime = 0;
+          this.groups = new Map();
+          this.count = 0;
+          // this.delayListeners = new Map()
+        }
+
+        set(obj, key, method) {
+          let group = this.groups.get(obj);
+          if (!group) {
+            group = {};
+            this.groups.set(obj, group);
+          }
+          group[key] = method;
+        }
+
+        async start() {
+          if (this.running) {
+            return;
+          }
+          this.running = true;
+          this.currentTask = new Promise(async (resolve) => {
+            while (this.running) {
+              let now = Date.now();
+              let remain = this.delay - (now - this.lastDispatchTime);
+              if (remain > 0) {
+                await new Promise((r) => setTimeout(r, remain));
+              }
+              let groups = this.groups;
+              await new Promise((resolve) =>
+                window.requestAnimationFrame(async () => {
+                  this.groups = new Map();
+                  for (let [obj, group] of groups) {
+                    if (!obj || !group) {
+                      continue;
+                    }
+                    for (let p in group) {
+                      try {
+                        group[p]?.();
+                      } catch (e) {
+                        console.log(e);
+                      }
+                    }
+                  }
+                  resolve();
+                })
+              );
+            }
+            this.lastDispatchTime = Date.now();
+            this.currentTask = undefined;
+            this.running = false;
+            resolve();
+          });
+          await this.currentTask;
+        }
+
+        async stop() {
+          this.running = false;
+          await this.currentTask;
+        }
+
+        setDelay(delay) {
+          this.delay = delay;
+        }
+      }
+
+      const delayDispatcher = new DelayDispatcher();
+
+      const registerProperties = (obj, ...props) => {
+        const backup = {};
+        if (!obj.define) {
+          addPropChange(obj);
+        }
+        props.forEach((prop) => {
+          const desc = Object.getOwnPropertyDescriptor(obj, prop);
+          if (desc && !desc.configurable) {
+            delete backup[prop];
+            return;
+          }
+          let propValue;
+          let [propName, handler] =
+            prop instanceof Array ? prop : [prop, undefined];
+          if (obj[propName] !== undefined) {
+            backup[propName] = obj[propName];
+          }
+          Object.defineProperty(obj, propName, {
+            get() {
+              return propValue;
+            },
+            set(newValue) {
+              if (propValue === newValue) {
+                return;
+              }
+              const oldValue = propValue;
+              propValue = newValue;
+              obj.raise(propName, newValue, oldValue);
+              handler?.(newValue, oldValue);
+              delayDispatcher.set(obj, propName, () => {
+                obj.raise(propName, newValue, oldValue, true);
+              });
+            },
+          });
+        });
+        Object.assign(obj, backup);
+        return obj;
+      };
+
+      const registerAllProperties = (obj) => {
+        return registerProperties(obj, ...Object.keys(obj));
+      };
+
+      Object.defineProperty(Object.prototype, "registerProperties", {
+        value: function (...props) {
+          return registerProperties(this, ...props);
+        },
+      });
+
+      Object.defineProperty(Object.prototype, "registerAllProperties", {
+        value: function () {
+          return registerAllProperties(this);
+        },
+      });
+
+      delayDispatcher;
+
+      const addPropChange = (/**@type { Object } */ obj) => {
+        /**@type Map<string, Set<{(newValue, oldValue):any}>> */
+        const atonceListeners = new Map();
+        const delayListeners = new Map();
+        const thisProp = "this";
+        Object.defineProperty(obj, thisProp, {
+          get() {
+            return obj;
+          },
+        });
+        Object.defineProperty(obj, "define", {
+          value: (...props) => registerProperties(obj, ...props),
+        });
+        Object.defineProperty(obj, "on", {
+          value: (
+            /**@type string */ prop,
+            listener,
+            delay = false,
+            additional
+          ) => {
+            let l = delay ? delayListeners : atonceListeners;
+            if (!l.has(prop)) {
+              l.set(prop, new Map());
+            }
+            l.get(prop).set(listener, additional);
+            if (delay && delayDispatcher?.delayListeners) {
+              delayDispatcher.delayListeners.set(listener, additional);
+            }
+            delayDispatcher.count++;
+          },
+        });
+
+        Object.defineProperty(obj, "off", {
+          value: (prop, listener, delay = false) => {
+            let l = delay ? delayListeners : atonceListeners;
+            if (!l.has(prop)) {
+              return;
+            }
+            l.get(prop).delete(listener);
+            if (delay && delayDispatcher?.delayListeners) {
+              delayDispatcher.delayListeners.delete(listener);
+            }
+            delayDispatcher.count--;
+          },
+        });
+
+        Object.defineProperty(obj, "clearOn", {
+          value: (delay) => {
+            let l = delay ? delayListeners : atonceListeners;
+            delayDispatcher.count -= l.size;
+            if (delay && delayDispatcher?.delayListeners) {
+              l.forEach((_, listener) => {
+                delayDispatcher.delayListeners.delete(listener);
+              });
+            }
+            l.clear();
+            // for (let p in obj) {
+            //   obj[p].clearOn?.(delay)
+            // }
+          },
+        });
+        Object.defineProperty(obj, "dispose", {
+          value: () => {
+            obj.clearOn(false);
+            obj.clearOn(true);
+          },
+        });
+        Object.defineProperty(obj, "hasOn", {
+          value: (prop, delay = false) => {
+            let l = delay ? delayListeners : atonceListeners;
+            return l.has(prop);
+          },
+        });
+
+        Object.defineProperty(obj, "raise", {
+          value: (prop, newValue, oldValue, delay = false) => {
+            if (prop !== thisProp) {
+              obj.raise(thisProp, obj, obj, delay);
+            }
+            let l = delay ? delayListeners : atonceListeners;
+            if (!l.has(prop)) {
+              return;
+            }
+            for (const [listener, _] of l.get(prop)) {
+              listener(newValue, oldValue);
+            }
+          },
+        });
+      };
+
+      const registerElement = (tagName, /**@type { string } */ constructor) => {
+        const elementClassName = `HTML${
+          constructor || getNameFromTagName(tagName)
+        }Element`;
+        constructor = constructor || "Object";
+        eval(`
+    class ${elementClassName} extends HTMLElement{
+      constructor(){
+        super()
+        const shadow = this.attachShadow({mode:'open'})
+        const template = document.getElementById('${tagName}')
+        if(!template || template.tagName !== 'TEMPLATE' ){
+          throw new Error('Define Template')
+        }
+        this.template_ = template
+        this.shadow_ = shadow
+        this.model_ = new ${constructor}()
+        this.model_.components = { host: this.shadow_ }
+        if(this.context && this.hasAttribute('model.')){
+          const modeExp = this.getAttribute('model.')
+          this.model = evalInContext(modeExp, this.context)
+        }else if(this.modelBeforeInit){
+          this.model = this.modelBeforeInit
+        }else{
+          this.model =  {}
+        }
+      }
+
+      rebuildView(){
+        this.shadow_.innerHTML = ''
+        const instance = document.importNode(this.template_.content, true)
+        this.shadow_.appendChild(instance)
+      }
+  
+      get model(){
+        return this.model_
+      }
+  
+      set model(value){
+        if(value?.on){
+          this.model_ = value || {}
+          this.model_.components = { host: this.shadow_ , ...this.model_.components||{}}
+        }else{
+          //combine code behind with model
+          Object.assign(this.model_, value)
+        }
+        this.shadow_.context = this.model_ 
+        this.rebuildView()
+      }
+  
+      updateModel(value){
+        this.model = value
+        this.connectedCallback()
+      }
+      
+      connectedCallback(){
+        binding(this.shadow_)
+        if(this.model_.launch){
+          this.model_.launch()
+        } 
+      }
+    }
+    customElements.define('${tagName}', ${elementClassName})
+    `);
+      };
+      return {
+        registerElement,
+        registerProperties,
+        evalInContext,
+        delayDispatcher,
+      };
+    })();
+
+    const sleep = (timeout) =>
+      new Promise((resolve) => setTimeout(resolve, timeout));
+
+    class AppBase {
+      async launch() {
+        if (this.launched) {
+          return;
+        }
+        this.launched = true;
+        this.storage = this.initStorage_();
+        this.data = await this.initData(window.appData);
+        window.app = this;
+        await this.start();
+      }
+
+      async registerStorageProperties(...props) {
+        if (!this.storage) {
+          return;
+        }
+        let asyncTimeout = 50;
+        const bgTimeout = 200;
+        for (const [prop, defaultValue, onchange] of props) {
+          let propValue;
+          let valueModified = false;
+          let successLoadFromStorage = false;
+          let loadFunc;
+          let bgLoad = false;
+          const mergeValue = (savedValue) => {
+            if (successLoadFromStorage) {
+              return;
+            }
+            successLoadFromStorage = true;
+            if (!valueModified) {
+              valueModified = true;
+              propValue = savedValue;
+            } else {
+              // merge strategy
+              propValue = savedValue;
+            }
+            if (bgLoad && onchange) {
+              onchange();
+            }
+          };
+          loadFunc = async () => {
+            const jsonStr = await this.storage.getItem(prop);
+            let savedValue;
+            if (!jsonStr) {
+              savedValue = defaultValue;
+            } else {
+              try {
+                savedValue = JSON.parse(jsonStr);
+              } catch {
+                savedValue = defaultValue;
+              }
+            }
+            mergeValue(savedValue);
+          };
+          const tryLoad = async () => {
+            bgLoad = true;
+            const func = loadFunc;
+            loadFunc = null;
+            await Promise.race([
+              func(),
+              sleep(bgTimeout).then(() => {
+                if (!successLoadFromStorage) {
+                  loadFunc = func;
+                }
+              }),
+            ]);
+          };
+          await Promise.race([
+            loadFunc(),
+            sleep(asyncTimeout).then(() => {
+              if (!valueModified) {
+                propValue = defaultValue;
+                valueModified = true;
+                asyncTimeout = 0;
+              }
+            }),
+          ]);
+          Object.defineProperty(this, prop, {
+            get() {
+              if (loadFunc) {
+                tryLoad();
+              }
+              return propValue;
+            },
+            set(newValue) {
+              propValue = newValue;
+              if (successLoadFromStorage) {
+                this.storage.setItem(prop, JSON.stringify(propValue));
+              }
+            },
+          });
+        }
+      }
+
+      initStorage_() {
+        if (window.$localStorage) {
+          return window.$localStorage;
+        }
+        try {
+          const s = window.localStorage;
+          return s;
+        } catch {
+          return {
+            getItem: () => "",
+            setItem: () => true,
+          };
+        }
+      }
+
+      async initData(data) {
+        return data;
+      }
+
+      async start() {
+        console.log("start");
+      }
+
+      async pause() {
+        console.log("pause");
+      }
+
+      async resume() {
+        console.log("pause");
+      }
+
+      async stop() {
+        console.log("stop");
+      }
+    }
+
+    window.onload = async () => {
+      let currentClass = App;
+      while (true) {
+        let baseClass = Object.getPrototypeOf(currentClass);
+        if (
+          !baseClass ||
+          Object.getPrototypeOf(Object) === Object.getPrototypeOf(currentClass)
+        ) {
+          break;
+        }
+        currentClass = baseClass;
+      }
+      Object.setPrototypeOf(currentClass.prototype, AppBase.prototype);
+      for (const template of document.querySelectorAll(
+        "template[id][view-model]"
+      )) {
+        const tagName = template.getAttribute("id");
+        if (!tagName) {
+          continue;
+        }
+        const codeBehind = template.getAttribute("view-model");
+        registerElement(tagName, codeBehind);
+      }
+      delayDispatcher.start();
+    };
+  </script>
+
+  <style>
+    html,
+    body {
+      height: 100%;
+      margin: 0;
+    }
+  </style>
+
+  <body>
+    <app-main></app-main>
+
+    <template id="h-stack" view-model>
+      <slot></slot>
+      <style>
+        :host {
+          display: flex;
+          flex-direction: row;
+        }
+      </style>
+    </template>
+    <template id="v-stack" view-model>
+      <slot></slot>
+      <style>
+        :host {
+          display: flex;
+          flex-direction: column;
+        }
+      </style>
+    </template>
+    <template id="hv-stack" view-model>
+      <slot></slot>
+      <style>
+        :host {
+          display: flex;
+          flex-direction: column;
+        }
+
+        @media (orientation: landscape) {
+          :host {
+            flex-direction: row;
+          }
+        }
+      </style>
+    </template>
+
+    <template id="vh-stack" view-model>
+      <slot></slot>
+      <style>
+        :host {
+          display: flex;
+          flex-direction: row;
+        }
+
+        @media (orientation: landscape) {
+          :host {
+            flex-direction: column;
+          }
+        }
+      </style>
+    </template>
+
+    <template id="h-square" view-model>
+      <slot></slot>
+      <style>
+        :host {
+          width: 100vw;
+          height: 100vw;
+        }
+
+        @media (orientation: landscape) {
+          :host {
+            width: 100vh;
+            height: 100vh;
+          }
+        }
+      </style>
+    </template>
+
+    <template id="h-spacer" view-model>
+      <slot></slot>
+      <style>
+        :host {
+          flex: 1;
+          display: flex;
+        }
+      </style>
+    </template>
+
+    <template id="h-text" view-model>
+      <span inner-text$.="content"></span>
+      <style>
+        :host {
+          flex: 1;
+          display: flex;
+          align-items: center;
+          place-content: center;
+        }
+      </style>
+    </template>
+
+    <template id="play-button" view-model>
+      <span id="btnPlay" class="play-button" class-pause.="isPlaying"></span>
+      <style>
+        :host {
+          display: block;
+          border-radius: 5px;
+          padding: 3px 10px;
+          background-color: #fff4;
+        }
+
+        .play-button {
+          display: block;
+          width: 100%;
+          height: 100%;
+          background-color: var(--color);
+          clip-path: polygon(25% 10%, 25% 90%, 95% 50%, 25% 10%);
+          transition: 200ms all ease-in-out;
+        }
+
+        .play-button.pause {
+          clip-path: polygon(
+            60% 50%,
+            20% 20%,
+            20% 80%,
+            60% 50%,
+            60% 80%,
+            80% 80%,
+            80% 20%,
+            60% 20%
+          );
+        }
+      </style>
+    </template>
+
+    <template id="menu-bar" view-model>
+      <h-stack>
+        <div class-hidden.="!item.show" class="menu-item" for.="item of menus">
+          <span inner-text$.="item.name" onclick.="item.onclick()"></span>
+        </div>
+      </h-stack>
+      <style>
+        :host {
+          display: block;
+        }
+
+        h-stack {
+          overflow: hidden;
+        }
+
+        .menu-item {
+          margin: 5px;
+          background-color: var(--menu-background-color);
+          border-radius: 4px;
+          padding: 2px 5px;
+          color: var(--menu-color);
+          display: flex;
+          justify-content: center;
+          flex: 1;
+        }
+
+        .menu-item > span {
+          display: block;
+          text-overflow: ellipsis;
+          white-space: pre;
+          overflow: hidden;
+          max-width: 6em;
+        }
+
+        .hidden {
+          display: none;
+        }
+      </style>
+    </template>
+
+    <script>
+      class MenuItem {
+        constructor(name = "", onclick = null, show = true) {
+          registerProperties(this, "name", "show");
+          this.name = name;
+          this.show = show;
+          this.onclick = onclick;
+        }
+      }
+    </script>
+
+    <template id="modal-panel" view-model="Modal">
+      <div>
+        <span
+          class="toastMessage"
+          if.="toastMessage"
+          inner-text$.="toastMessage"
+        ></span>
+        <div if.="open" class="modal-wraper" onclick.="close()">
+          <div class="modal" onclick="event.stopPropagation()">
+            <div class="title">
+              <span inner-text$.="title"></span>
+            </div>
+            <div class="body">
+              <div if.="items?.length">
+                <div
+                  class="item"
+                  for.="item of items"
+                  class-highlight.="item === selectedItem"
+                  onclick.="close(item)"
+                >
+                  <span
+                    inner-text$.="options.itemName?item[options.itemName]:item"
+                  ></span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <style>
+        .hidden {
+          /* left: -100%; */
+          /* transition: ease-in-out 0.05s left; */
+          display: none;
+        }
+
+        .toastMessage {
+          color: var(--toast-color, #eee);
+          background-color: var(--toast-background-color, #0008);
+          position: fixed;
+          bottom: 0;
+          margin: 20px auto;
+          left: 50%;
+          transform: translate(-50%, 0);
+          padding: 5px 20px;
+          border-radius: 4px;
+          text-align: center;
+          backdrop-filter: blur(5px);
+        }
+
+        .modal-wraper {
+          position: absolute;
+          top: 0;
+          left: 0;
+          width: 100%;
+          height: 100%;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+        }
+
+        .modal {
+          background: #fff;
+          border-radius: 10px;
+          padding: 10px;
+          width: 90%;
+          max-height: 90%;
+          box-shadow: 3px 3px 5px;
+        }
+
+        .modal .title {
+          font-size: large;
+          margin: 5px 0;
+          font-weight: bold;
+        }
+
+        .modal .body {
+          margin: 5px 0;
+        }
+
+        .modal .foot {
+          margin: 5px 0;
+        }
+
+        .item {
+          margin: 8px 0;
+          background: #0002;
+          padding: 5px;
+          border-radius: 8px;
+        }
+
+        .item.highlight {
+          background: #0008;
+          color: white;
+        }
+      </style>
+    </template>
+    <script>
+      class Modal {
+        constructor() {
+          /**@type { Object.<string,HTMLElement> } */
+          this.components;
+          /**@type { Storage | {  } } */
+          this.storage;
+          registerProperties(
+            this,
+            "toastMessage",
+            "title",
+            "items",
+            "selectedItem",
+            "open",
+            "options"
+          );
+        }
+        toast(/**@string */ msg, /**@type number */ timeout = 1000, task) {
+          return new Promise(async (resolve) => {
+            this.toastMessage = msg;
+            await task;
+            setTimeout(() => {
+              this.toastMessage = null;
+              resolve();
+            }, timeout);
+          });
+        }
+
+        close(result) {
+          if (!this.resolveTask) {
+            return;
+          }
+          if (this.options.requilred && !result) {
+            return;
+          }
+          this.open = undefined;
+          this.resolveTask.resolve(result);
+        }
+
+        select(
+          /** @type string */ msg,
+          /** @type [any] */ values = [],
+          defaultIdx = 0,
+          opt = undefined
+        ) {
+          if (this.resolveTask) {
+            const { resolve, reject } = this.resolveTask;
+            this.resolveTask = undefined;
+            reject();
+          }
+          this.title = msg;
+          this.items = values;
+          this.selectedItem = values[defaultIdx];
+          this.options = opt || {};
+          this.open = true;
+          return new Promise(
+            (resolve, reject) => (this.resolveTask = { resolve, reject })
+          );
+        }
+      }
+    </script>
+    <template id="pop-up" view-model="Popup">
+      <div class="popup">
+        <slot></slot>
+      </div>
+      <style>
+        :host {
+          display: block;
+          position: relative;
+          left: 0;
+          top: 0;
+          bottom: 0;
+          right: 0;
+          position: fixed;
+          background: #0008;
+          backdrop-filter: blur(5px);
+        }
+
+        .popup {
+          max-width: 99%;
+          max-height: 99%;
+          position: absolute;
+          top: 50%;
+          left: 50%;
+          transform: translate(-50%, -50%);
+        }
+      </style>
+    </template>
+    <script>
+      class Popup {}
+    </script>
+  </body>
+</html>

@@ -1,0 +1,2483 @@
+<html>
+<meta charset="utf-8" />
+
+<script>
+  class Context {
+    constructor() {
+      this.currentLine = ''
+      this.lines = [this.currentLine]
+      this.styles = new Set()
+      this.enableCaret = false
+      this.caretY = 0
+      this.caretX = 0
+    }
+  }
+
+  class TerminalReplayer {
+    getCharSize(c) {
+      this.canvasCtx = this.canvasCtx || (() => {
+        const canvas = document.createElement('canvas')
+        const ctx = canvas.getContext('2d')
+        const s = window.getComputedStyle(this.root_)
+        ctx.font = s.font
+        return ctx
+      })()
+      const size = this.canvasCtx.measureText(c)
+      return [size.width, size.fontBoundingBoxAscent + size.fontBoundingBoxDescent]
+    }
+    isWideChar(c) {
+      if (!c || c === '\n') {
+        return false
+      }
+      if (this.wideCharMap.has(c)) {
+        return this.wideCharMap.get(c)
+      }
+      let isWideChar = this.getCharSize(c)[0] > this.minWideCharWidth
+      this.wideCharMap.set(c, isWideChar)
+      return isWideChar
+    }
+    constructor(root) {
+      this.root_ = root || document.createElement('div')
+      /**@type {WeakMap<string, boolean>} */
+      this.wideCharMap = new Map()
+      const [charWidth, lineHeight] = this.getCharSize('X')
+      this.lineHeight = Math.ceil(lineHeight * 1.1)
+      this.charWidth = charWidth
+      this.minWideCharWidth = charWidth * 1.5
+      this.width = Math.floor(this.root_.clientWidth / this.charWidth / 2) * 2
+      this.height = Math.floor(this.root_.clientWidth * 0.65 / this.lineHeight / 2) * 2
+      this.root_.style.height = (this.height * this.lineHeight) + 'px'
+      const shadow = this.root_.attachShadow({ mode: 'closed' })
+      const styleStr = `
+      :host {
+  --csi-color-0: rgb(1, 1, 1);
+  --csi-color-1: rgb(222, 56, 43);
+  --csi-color-2: rgb(57, 181, 74);
+  --csi-color-3: rgb(255, 199, 6);
+  --csi-color-4: rgb(0, 111, 184);
+  --csi-color-5: rgb(118, 38, 113);
+  --csi-color-6: rgb(44, 181, 233);
+  --csi-color-7: rgb(204, 204, 204);
+}
+.screen {
+  color: var(--csi-color-0);
+  background: var(--csi-color-7);
+  line-height: ${this.lineHeight}px;
+  width: 100%;
+  height: 100%;
+  box-sizing: border-box;
+  overflow-x: hidden;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  margin: 0;
+  display: grid;
+  grid-template-columns: repeat(${this.width},1fr);
+  align-content: start;
+}
+@keyframes blink {
+  0% {
+    opacity: 0;
+  }
+  49% {
+    opacity: 0;
+  }
+  60% {
+    opacity: 1;
+  }
+  99% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 1;
+  }
+}
+
+.caret {
+  animation: blink 1s infinite;
+  user-select: none;
+  shape-outside: content-box;
+}
+.csi-1 {
+  font-weight: bold;
+}
+.csi-2 {
+  font-weight: lighter;
+}
+.csi-3 {
+  font-style: italic;
+}
+.csi-30 {
+  color: var(--csi-color-0);
+}
+.csi-40 {
+  background-color: var(--csi-color-0);
+}
+.csi-31 {
+  color: var(--csi-color-1);
+}
+.csi-41 {
+  background-color: var(--csi-color-1);
+}
+.csi-32 {
+  color: var(--csi-color-2);
+}
+.csi-42 {
+  background-color: var(--csi-color-2);
+}
+.csi-33 {
+  color: var(--csi-color-3);
+}
+.csi-43 {
+  background-color: var(--csi-color-3);
+}
+.csi-34 {
+  color: var(--csi-color-4);
+}
+.csi-44 {
+  background-color: var(--csi-color-4);
+}
+.csi-35 {
+  color: var(--csi-color-5);
+}
+.csi-45 {
+  background-color: var(--csi-color-5);
+}
+.csi-36 {
+  color: var(--csi-color-6);
+}
+.csi-46 {
+  background-color: var(--csi-color-6);
+}
+.csi-37 {
+  color: var(--csi-color-7);
+}
+.csi-47 {
+  background-color: var(--csi-color-7);
+}
+code{
+  text-align: -webkit-center;
+  vertical-align: middle;
+  display: inline-block;
+}
+.new-line {
+  display:none;
+}
+.new-line + .new-line {
+  display:unset;
+}
+.new-line + *{
+  grid-column-start: 1;
+}
+.long-char{
+  grid-column-end: span 2;
+}
+.hidden {
+  display: none;
+}      
+`
+      const style = document.createElement('style')
+      style.innerHTML = styleStr
+      shadow.appendChild(style)
+      this.screen_ = document.createElement('pre')
+      this.screen_.classList.add('screen')
+      shadow.appendChild(this.screen_)
+      this.escapePrefix_ = '\u{1b}'
+      this.csiSurfix_ = 'm'
+    }
+
+    get view() {
+      return this.root_
+    }
+
+    printCaret_() {
+      const e = document.createElement('code')
+      e.innerText = '|'
+      e.classList.add('caret')
+      e.classList.add('hidden')
+      // e.setAttribute('contenteditable', true)
+      this.screen_.appendChild(e)
+      this.caret_ = e
+    }
+
+    clearScreen_(/**@type Context */ ctx, type) {
+      switch (type) {
+        case 1:
+          return
+        case 2:
+          ctx.caretX = 0
+          ctx.caretY = 0
+          this.screen_.innerHTML = ''
+          this.screen_.appendChild(this.caret_)
+          this.rows_ = [[]]
+          return
+        default:
+          let currentRow = this.rows_[ctx.caretY]
+          for (let i = ctx.caretX; i < currentRow.length; i++) {
+            this.screen_.removeChild(currentRow[i])
+          }
+          this.rows_[ctx.caretY] = currentRow.slice(0, ctx.caretX)
+          for (let j = ctx.caretY + 1; j < this.rows_.length; j++) {
+            currentRow = this.rows_[j]
+            for (let i = 0; i < currentRow.length; i++) {
+              this.screen_.removeChild(currentRow[i])
+            }
+          }
+          this.rows_ = this.rows_.slice(0, ctx.caretY + 1)
+          return
+      }
+    }
+
+    emptyChar(char) {
+      char.innerHTML = ' '
+      char.isEmpty = true
+    }
+
+    eraseInLine(/**@type Context */ ctx, type) {
+      let row = this.rows_[ctx.caretY]
+      switch (type) {
+        case 0: //to end
+          for (let char of row.slice(ctx.caretX)) {
+            // this.screen_.removeChild(char)
+            // char.innerHTML = ' '
+            this.emptyChar(char)
+          }
+          // row = row.slice(0, ctx.caretX)
+          break
+        case 1: //to begin
+          for (let char of row.slice(0, ctx.caretX)) {
+            // this.screen_.removeChild(char)
+            // char.innerHTML = ' '
+            this.emptyChar(char)
+          }
+          // row = row.slice(ctx.caretX, 0)
+          // ctx.caretX = 0
+          break
+        case 2: //clear all
+          for (let char of row) {
+            // this.screen_.removeChild(char)
+            // char.innerHTML = ' '
+            this.emptyChar(char)
+          }
+          // row = []
+          // ctx.caretX = 0
+          break
+        default:
+          break
+      }
+      this.rows_[ctx.caretY] = row
+    }
+
+    changeCaretPosition_(/**@type Context */ ctx, dx = 0, dy = 0, x, y) {
+      let nextY = y !== undefined ? y : (ctx.caretY + (dy || 0))
+      let nextX = x !== undefined ? x : (ctx.caretX + (dx || 0))
+      nextY = Math.min(this.rows_.length - 1, nextY)
+      nextY = Math.max(0, nextY)
+      const row = this.rows_[nextY]
+      nextX = Math.min(row.length, nextX)
+      nextX = Math.max(0, nextX)
+      this.screen_.removeChild(this.caret_)
+      const nextChar = row[nextX]
+      if (nextChar) {
+        this.screen_.insertBefore(this.caret_, nextChar)
+      } else {
+        this.screen_.appendChild(this.caret_)
+      }
+      ctx.caretX = nextX
+      ctx.caretY = nextY
+    }
+
+    changeCaretState_(/**@type Context */ ctx, enable = false) {
+      ctx.enableCaret = enable
+      if (enable) {
+        this.caret_.classList.remove('hidden')
+      } else {
+        this.caret_.classList.add('hidden')
+      }
+    }
+
+    resetAll_(ctx) {
+      this.resetCsi_(ctx)
+    }
+
+    async escape_(/**@type Context */ ctx) {
+      const type = ctx.currentLine[0]
+      switch (type) {
+        case 'N':
+        case 'O':
+        case 'P':
+        case '\\':
+        case ']':
+        case 'X':
+        case '^':
+        case '_':
+        case 'N':
+          ctx.currentLine = ctx.currentLine.slice(1)
+          return
+        case 'c':
+          ctx.currentLine = ctx.currentLine.slice(1)
+          await this.resetAll_(ctx)
+          return
+        case '[':
+          ctx.currentLine = ctx.currentLine.slice(1)
+          await this.csi_(ctx)
+          return
+        default:
+          return
+      }
+    }
+
+    resetCsi_(/**@type Context */ ctx) {
+      ctx.styles.clear()
+    }
+
+    csiClear_(/**@type Context */ ctx, /**@type string */ group) {
+      ctx.styles.delete(group)
+    }
+
+    csiSet_(/**@type Context */ ctx, csiCmd, /**@type string */ group) {
+      ctx.styles.add(group)
+      ctx[group] = `csi-${csiCmd}`
+    }
+
+    csiSgr_(/**@type Context */ ctx, sgrType) {
+      switch (sgrType) {
+        case 0:
+          this.resetCsi_(ctx)
+          return
+        case 1:
+        case 2:
+          this.csiSet_(ctx, sgrType, 'font-weight')
+          return
+        case 3:
+          this.csiSet_(ctx, sgrType, 'font-style')
+          return
+        case 5:
+        case 6:
+          this.changeCaretState_(ctx, true)
+          return
+        case 25:
+          this.changeCaretState_(ctx, false)
+          return
+        case 30:
+        case 31:
+        case 32:
+        case 33:
+        case 34:
+        case 35:
+        case 36:
+        case 37:
+          this.csiSet_(ctx, sgrType, 'color')
+          return
+        case 40:
+        case 41:
+        case 42:
+        case 43:
+        case 44:
+        case 45:
+        case 46:
+        case 47:
+          this.csiSet_(ctx, sgrType, 'background')
+          return
+        default:
+          return
+      }
+    }
+
+    async csi_(/**@type Context */ ctx) {
+      const match = ctx.currentLine.match(/^([\d;]*)([ABCDEFGHJKSTZfminsu])/)
+      if (!match) {
+        return
+      }
+      const csiType = match[2]
+      const args = match[1].split(';').map((arg) => parseInt(arg))
+      const arg = args[args.length - 1]
+      ctx.currentLine = ctx.currentLine.slice(match[0].length)
+      switch (csiType) {
+        case 'm':
+          this.csiSgr_(ctx, arg || 0)
+          return
+        case 'C':
+          if (arg >= 0) {
+            this.changeCaretPosition_(ctx, arg || 1)
+          }
+          return
+        case 'D':
+          if (arg >= 0) {
+            this.changeCaretPosition_(ctx, -(arg || 1))
+          }
+          return
+        case 'E':
+          if (arg >= 0) {
+            this.changeCaretPosition_(ctx, undefined, (arg || 1), 0)
+          }
+          return
+        case 'F':
+          if (arg >= 0) {
+            this.changeCaretPosition_(ctx, undefined, -(arg || 1), 0)
+          }
+          return
+        case 'H':
+          this.changeCaretPosition_(ctx, undefined, undefined, (args[0] || 1) - 1, (args[1] || 1) - 1)
+          return
+        case 's':
+          this.ctx_.lastCaret = { x: this.ctx_.caretX, y: this.ctx_.caretY }
+          return
+        case 'u':
+          if (this.ctx_.lastCaret) {
+            const { x, y } = this.ctx_.lastCaret
+            this.changeCaretPosition_(ctx, undefined, undefined, x, y)
+          }
+          return
+        case 'K':
+          if (arg >= 0) {
+            this.eraseInLine(ctx, arg)
+          }
+          return
+        case 'Z':
+          if (arg > 0) {
+            await sleep(arg)
+          }
+          return
+        case 'J':
+          this.clearScreen_(ctx, arg || 0)
+          return
+        default:
+          return
+      }
+    }
+
+    printChar_(/**@type Context */ ctx, c) {
+      const nextChar = this.rows_[ctx.caretY][ctx.caretX]
+      const e = document.createElement('code')
+      e.innerText = c
+      if (this.isWideChar(c)) {
+        e.classList.add('long-char')
+      } else {
+        e.classList.remove('long-char')
+      }
+      for (const style of ctx.styles) {
+        ctx[style] && e.classList.add(ctx[style])
+      }
+      this.screen_.insertBefore(e, this.caret_)
+      if (nextChar) {
+        this.screen_.removeChild(nextChar)
+      }
+      this.rows_[ctx.caretY] = [
+        ...this.rows_[ctx.caretY].slice(0, ctx.caretX),
+        e,
+        ...this.rows_[ctx.caretY].slice(nextChar ? ctx.caretX + 1 : ctx.caretX),
+      ]
+      if (c === '\n') {
+        e.classList.add('new-line')
+        let row = this.rows_[ctx.caretY]
+        for (let char of row.slice(ctx.caretX + 1)) {
+          this.screen_.removeChild(char)
+        }
+        row = row.slice(0, ctx.caretX + 1)
+        this.rows_[ctx.caretY] = row
+        ctx.caretY++
+        ctx.caretX = 0
+        this.rows_[ctx.caretY] = this.rows_[ctx.caretY] || []
+      } else {
+        ctx.caretX++
+      }
+      this.screen_.scrollTo({
+        top: this.screen_.scrollHeight - this.screen_.clientHeight,
+      })
+    }
+
+    async printLine_(/**@type Context */ ctx) {
+      while (ctx.currentLine.length) {
+        if (ctx.currentLine.startsWith(this.escapePrefix_)) {
+          ctx.currentLine = ctx.currentLine.slice(this.escapePrefix_.length)
+          await this.escape_(ctx)
+          continue
+        }
+        let c = ctx.currentLine[0]
+        ctx.currentLine = ctx.currentLine.slice(1)
+        if (c === '\u{d}' && ctx.currentLine[0] === '\n') {
+          c = ctx.currentLine[0]
+          ctx.currentLine = ctx.currentLine.slice(1)
+        }
+        this.printChar_(ctx, c)
+        if (!ctx.currentLine.length) {
+          return
+        }
+        if (this.cancleToken_.cancled) {
+          continue
+        }
+        if (ctx.enableCaret) {
+          this.inputCharDelay_ && (await sleep(this.inputCharDelay_))
+        } else {
+          this.outputCharDelay_ && (await sleep(this.outputCharDelay_))
+        }
+      }
+    }
+
+    async replay(data, option, /**@type { {cancled : boolean} } */ cancleToken) {
+      const { inputCharDelay = 75, outputCharDelay = 0 } = option || {}
+      this.inputCharDelay_ = inputCharDelay
+      this.outputCharDelay_ = outputCharDelay
+      this.cancleToken_ = cancleToken
+      const ctx = new Context()
+      this.ctx_ = ctx
+      ctx.lines = data
+      this.screen_.innerHTML = ''
+      this.printCaret_()
+      this.rows_ = [[]]
+      for (const line of ctx.lines) {
+        ctx.currentLine = line
+        if (line.delay) {
+          this.cancleToken_.cancled || (await sleep(line.delay))
+          continue
+        }
+        await this.printLine_(ctx)
+      }
+    }
+
+    async printLine(data) {
+      const ctx = this.ctx_
+      if (!ctx) {
+        return
+      }
+      ctx.currentLine = (ctx.currentLine || '') + data
+      await this.printLine_(this.ctx_)
+    }
+  }
+
+  const highlight = (/**@type string */ content, noadditionalPrefix = false) => {
+    const results = []
+    const lines = content.split('\n')
+    let prefix
+    for (let line of lines) {
+      let match = line.match(/^([\$#]|(?:PS.*?>)|(?:>>>)|(?:>))(\s+)(\w+)?(.*)/)
+      if (!match) {
+        results.push(line)
+        continue
+      }
+      prefix = `\u{1b}[34m${match[1]}\u{1b}[0m${match[2]}\u{1b}[5m`
+      line = `${prefix}\u{1b}[32m${match[3] || ''}\u{1b}[0m${match[4]}\u{1b}[25m`
+      line = line.replace(
+        /\|\s?\w+/g,
+        (s) => `\u{1b}[34m${s[0]}\u{1b}[0m\u{1b}[32m${s.slice(1)}\u{1b}[0m`
+      )
+      line = line.replace(/(\$\w+)/g, (s) => `\u{1b}[31m${s}\u{1b}[0m`)
+      results.push(line)
+    }
+    if (!noadditionalPrefix) {
+      prefix && results.push(prefix)
+    }
+    return results.join('\n')
+  }
+
+  class App {
+    constructor() {
+      /** @type { Object.<string,HTMLElement> } */
+      this.components;
+      registerProperties(this, "title");
+    }
+
+    initData() { }
+    async start() {
+      /** @type { { toast:(msg:string, timeout:number = 1000)=>Promise<any> } } */
+      this.modal_ = this.components.modal.model;
+      /**@type {AppEngine} */
+      this.engine = this.components.engine.model;
+      this.replayer = new TerminalReplayer(this.components.terminal)
+      this.keyboard = this.components.keyboard.model
+      this.target = this.target || document.body
+      this.keyboard.target = this.target
+      this.input = ''
+      this.inputHistories = []
+      this.maxInputHistoryCount = 20
+      this.currentInputHistory = -1
+      this.target.addEventListener('keyup', this.onkeyup.bind(this))
+      this.target.addEventListener('paste', (event) => {
+        if (this.running) {
+          return
+        }
+        const text = event.clipboardData.getData('text/plain')
+        this.refreshLine(this.input + text)
+      });
+
+      this.cancleToken = { cancled: false }
+      const option = { inputCharDelay: 0, outputCharDelay: 0 }
+      this.write = (str) => this.replayer.printLine(str)
+      this.apis = { write: this.write, isWideChar: this.replayer.isWideChar.bind(this.replayer), getTerminalSize: () => ({ width: this.replayer.width, height: this.replayer.height }) }
+      await this.replayer.replay(
+        [],
+        option,
+        this.cancleToken
+      )
+      this.commands = new Map([
+        ['clear', async () => {
+          this.replayer.printLine('\u{1b}[2J')
+          this.refreshLine('')
+        }],
+        ['history', async () => {
+          this.replayer.printLine('\n' + [...this.inputHistories].reverse().map((v, i) => i.toString().padStart(4) + '    ' + v).join('\n') + '\n')
+          this.refreshLine('')
+        }]
+      ])
+      await this.engine.poweron(this.apis)
+      await this.write(this.getInputLine(this.input))
+    }
+
+    onkeyup(/**@type {KeyboardEvent}*/e) {
+      if (e.code === 'Esc') {
+        Api.appService.close()
+        return
+      }
+      if (this.running) {
+        return
+      }
+      if (e.key !== e.code && !new Set([
+        'Meta',
+        'Shift',
+        'Control',
+        'Alt',
+      ]).has(e.key)) {
+        this.appendInput(e.key)
+        return
+      }
+      switch (e.key) {
+        case 'Backspace':
+          this.backspaceInput()
+          break
+        case 'Enter':
+          this.excuteInput()
+          break
+        case 'ArrowUp':
+          this.changeHistory(1)
+          break
+        case 'ArrowDown':
+          this.changeHistory(-1)
+          break
+        default:
+          break
+      }
+    }
+
+    changeHistory(di) {
+      let i = this.currentInputHistory + di
+      if (i >= this.inputHistories.length) {
+        return
+      }
+      if (this.currentInputHistory === -1) {
+        this.inputHistories[-1] = this.input
+      }
+
+      if (i < 0) {
+        i = -1
+      }
+
+      this.currentInputHistory = i
+      this.refreshLine(this.inputHistories[i])
+    }
+
+    async excuteInput() {
+      this.running = true
+      let input = this.input.trim()
+      if (input !== this.inputHistories[0]) {
+        this.inputHistories.unshift(input)
+        if (this.inputHistories.length > this.maxInputHistoryCount) {
+          this.inputHistories.pop()
+        }
+      }
+      if (this.commands.has(input)) {
+        await this.commands.get(input)()
+      } else {
+        await this.replayer.printLine('\n')
+        await this.engine.excuteCommand(input, this.apis)
+        this.refreshLine('')
+      }
+      this.running = false
+    }
+
+    getInputLine(input) {
+      return highlight(this.engine.prompt + input, true) + '\u{1b}[5m'
+    }
+
+    refreshLine(input) {
+      let length = this.input.length + this.engine.prompt.length
+      let clear = length ? `\u{1b}[25m\u{1b}[${length}D\u{1b}[0K` : ''
+      this.input = input
+      this.replayer.printLine(clear + this.getInputLine(this.input))
+    }
+
+
+    appendInput(char) {
+      this.currentInputHistory = -1
+      this.refreshLine(this.input + char)
+    }
+
+    backspaceInput() {
+      // this.replayer.printLine('\u{1b}[1F\u{1b}[1E')
+      // return
+      this.currentInputHistory = -1
+      if (!this.input.length) {
+        return
+      }
+
+      this.refreshLine(this.input.slice(0, - 1))
+    }
+  }
+</script>
+<template id="app-main" view-model="App">
+  <div class="app">
+    <!-- <h-spacer></h-spacer> -->
+    <div class="terminal-wraper">
+      <div class="terminal" id="terminal"></div>
+    </div>
+    <h-spacer>
+      <app-engine id="engine"></app-engine>
+    </h-spacer>
+    <!-- <h-spacer></h-spacer> -->
+    <div class="keyboard-wraper">
+      <app-keyboard id="keyboard"></app-keyboard>
+    </div>
+  </div>
+  <modal-panel id="modal"></modal-panel>
+  <style>
+    :host {
+      display: block;
+    }
+
+    .app {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      width: 100%;
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .terminal-wraper {
+      margin-top: 45px;
+      width: 100vw;
+      box-sizing: border-box;
+      background: #f5f5f5;
+      border: solid #444;
+      border-width: 10px 0;
+      border-radius: 2px;
+    }
+
+    .terminal {
+      overflow: hidden;
+      height: 61.8vw;
+      font-size: 13px;
+      font-family: monospace;
+    }
+
+    .keyboard-wraper {
+      background: #444;
+      padding: 10px 5px 40px 5px;
+    }
+  </style>
+</template>
+
+<style>
+  body {
+    background: #2d2d2d;
+  }
+</style>
+
+<script>
+  class Keyboard {
+    constructor() {
+      this.longPressTime = 250
+      const keyItems = [
+        [
+          { key: "", displayKey: "⊗", code: "Esc" },
+          { key: "`", upperKey: "~", code: "Backquote" },
+          { key: "-", upperKey: "_", code: "Minus" },
+          { key: "=", upperKey: "+", code: "Equal" },
+          { key: "[", upperKey: "{", code: "BracketLeft" },
+          { key: "]", upperKey: "}", code: "BracketRight" },
+          { key: ",", upperKey: "<", code: "Comma" },
+          { key: ".", upperKey: ">", code: "Period" },
+          // { key: 'ArrowLeft', code: 'ArrowLeft', displayKey: '↤' },
+          { key: "ArrowUp", code: "ArrowUp", displayKey: "↥" },
+          { key: "ArrowDown", code: "ArrowDown", displayKey: "↧" },
+          // { key: 'ArrowRight', code: 'ArrowRight', displayKey: '↦' },
+          { key: "Enter", code: "Enter", displayKey: "⏎" },
+        ],
+        [
+          ...Array.from("!@#$%^&*()", (c, idx) =>
+            this.numberKeyBoardItem(c, ((idx + 1) % 10).toString())
+          ),
+          { key: "Backspace", code: "Backspace", displayKey: "⌫" },
+        ],
+        [
+          ...Array.from("qwertyuiop", (c) => this.leterKeyBoardItem(c)),
+          { key: "\\", upperKey: "|", code: "Backslash" },
+        ],
+        [
+          ...Array.from("asdfghjkl", (c) => this.leterKeyBoardItem(c)),
+          { key: ";", upperKey: ":", code: "Semicolon" },
+          { key: "'", upperKey: '"', code: "Quote" },
+        ],
+        [
+          ...Array.from("zxc", (c) => this.leterKeyBoardItem(c)),
+          { key: " ", code: "Space" },
+          ...Array.from("vbnm", (c) => this.leterKeyBoardItem(c)),
+          { key: "/", upperKey: "?", code: "Slash" },
+        ],
+      ];
+      keyItems.forEach(keys => keys.forEach(key => key.registerProperties('hideUpperKey', 'showUpperPop')))
+      this.keyItems = keyItems
+    }
+
+    numberKeyBoardItem(upperKey, key) {
+      return {
+        key,
+        upperKey,
+        code: "Digit" + key,
+      };
+    }
+
+    leterKeyBoardItem(key) {
+      const upperKey = key.toUpperCase();
+      return {
+        key,
+        upperKey,
+        code: "Key" + upperKey,
+        hideUpperKey: true,
+      };
+    }
+
+    onTouchend(e) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+
+    onMousecancle() {
+      if (this.pressedItem) {
+        this.pressedItem.showUpperPop = false;
+      }
+      this.pressedItem = null;
+    }
+
+    onMousedown(item) {
+      if (this.disabled || this.pressedItem === item) {
+        return;
+      }
+      this.pressedItem = item;
+      const pressId = this.pressId || Date.now()
+      this.pressId = pressId
+      setTimeout(() => {
+        if (this.pressId === pressId && this.pressedItem === item) {
+          item.showUpperPop = true;
+        }
+      }, this.longPressTime);
+
+      this.target?.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: item.key,
+          code: item.code,
+        })
+      );
+    }
+
+    onMouseup(item) {
+      this.pressId = 0
+      if (this.pressedItem !== item) {
+        this.pressedItem.showUpperPop = false;
+        this.pressedItem = null;
+        return;
+      }
+      const longPress = item.showUpperPop === true;
+      item.showUpperPop = false;
+
+      this.pressedItem = null;
+      const key = (longPress && item.upperKey) || item.key;
+      this.target?.dispatchEvent(
+        new KeyboardEvent("keyup", {
+          key,
+          code: item.code,
+        })
+      );
+    }
+  }
+</script>
+
+<template id="app-keyboard" view-model="Keyboard">
+  <div></div>
+  <div class="keyboard" onpointerup.="onTouchend($event)">
+    <div class="keyboard-line" for.="line of keyItems">
+      <div for.="key of line" class.="'keyboard-key ' + key.code" onpointerleave.="onMousecancle(key)"
+        onpointerdown.="onMousedown(key)" onpointerup.="onMouseup(key)">
+        <div>
+          <div if.="key.upperKey != null" class="upperKey" class-hidden.="key.hideUpperKey && !key.showUpperPop"
+            class-popup.="key.showUpperPop">
+            <span inner-text$.="key.displayUpperKey || key.upperKey"></span>
+          </div>
+          <div class-hidden.="key.showUpperPop" class="key">
+            <span inner-text$.="key.displayKey || key.key"></span>
+          </div>
+        </div>
+      </div>
+    </div>
+    <style>
+      :host {
+        --key-bg: #ccc;
+        --key-border-active: green;
+        --key-bg-function: #00A000;
+        --key-fg: rgb(204, 204, 204);
+        --bbg: #fff;
+        --key-bg-danger: #A00000;
+      }
+
+      .keyboard {
+        user-select: none;
+        -webkit-user-select: none;
+        font-family: monospace;
+        font-size: large;
+      }
+
+      .keyboard-key>div {
+        background: transparent;
+        color: var(--key-bg);
+        box-shadow: 0 1px 1px 1px rgba(0, 0, 0, 0.14);
+      }
+
+      .keyboard-key>div:active {
+        box-shadow: 0 1px 3px 1px var(--key-border-active);
+      }
+
+      .keyboard-key>div>.upperKey {
+        color: var(--key-fg);
+      }
+
+      .keyboard-key>div>.key {
+        color: var(--key-fg);
+      }
+
+      .ArrowLeft>div,
+      .ArrowRight>div,
+      .ArrowUp>div,
+      .ArrowDown>div,
+      .Enter>div {
+        background-color: var(--key-bg-function);
+      }
+
+      .ArrowLeft>div>.upperKey,
+      .ArrowRight>div>.upperKey,
+      .ArrowUp>div>.upperKey,
+      .ArrowDown>div>.upperKey,
+      .Enter>div>.upperKey {
+        color: var(--bbg);
+      }
+
+      .ArrowLeft>div>.key,
+      .ArrowRight>div>.key,
+      .ArrowUp>div>.key,
+      .ArrowDown>div>.key,
+      .Enter>div>.key {
+        color: var(--bbg);
+      }
+
+      .Esc>div,
+      .Backspace>div {
+        background-color: var(--key-bg-danger);
+      }
+
+      .Esc>div>.upperKey,
+      .Backspace>div>.upperKey {
+        color: var(--bbg);
+      }
+
+      .Esc>div>.key,
+      .Backspace>div>.key {
+        color: var(--bbg);
+      }
+
+      .keyboard-key>div .popup.upperKey {
+        background-color: var(--key-bg-function);
+        color: var(--bbg);
+        box-shadow: 0 1px 3px 1px var(--key-border-active);
+      }
+
+      .keyboard-line {
+        display: flex;
+        justify-content: center;
+      }
+
+      .keyboard-key {
+        flex: 1;
+        user-select: none;
+      }
+
+      .keyboard-key>div {
+        border-radius: 4px;
+        margin: 2px;
+        box-sizing: border-box;
+        align-items: stretch;
+        height: 42px;
+        display: flex;
+        justify-content: center;
+        flex-direction: column;
+      }
+
+      .keyboard-key>div>div {
+        text-align: center;
+      }
+
+      .keyboard-key>div>.popup {
+        position: relative;
+        top: -2.4em;
+        padding: 10px 0;
+        border-radius: 1em 0;
+      }
+
+      .Space.keyboard-key {
+        flex: 3;
+      }
+
+      .pressed-key {
+        position: absolute;
+        left: 50%;
+        top: 50%;
+        transform: translateX(-50%) translateY(-50%);
+        font-size: 3em;
+        text-align: center;
+        border-radius: 4px;
+      }
+
+      .hidden {
+        display: none;
+      }
+    </style>
+</template>
+<script>
+  window.appData = window.appData || {};
+</script>
+
+<meta name="viewport" content="width=device-width, maximum-scale=1.0,user-scalable=no, initial-scale=1" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="transparent" />
+<script>
+  const {
+    registerElement,
+    registerProperties,
+    evalInContext,
+    delayDispatcher,
+  } = (() => {
+    const evalInContext = (exp, context) => {
+      return function () {
+        with (this) {
+          try {
+            return eval(`(${exp})`);
+          } catch (e) {
+            console.log(exp);
+            console.log(e);
+            return;
+          }
+        }
+      }.call(context);
+    };
+
+    const removeItem = (item) => {
+      const clearItem = (/**@type {HTMLElement}*/ item) => {
+        for (let c of item.childNodes) {
+          clearItem(c);
+        }
+        let onRemoves = item.onRemoves;
+        item.onRemoves = undefined;
+        if (onRemoves?.length) {
+          onRemoves.forEach((onRemove) => onRemove());
+        }
+      };
+      clearItem(item);
+      item.remove();
+    };
+
+    const onprop = (parent, /**@type {String} */ exp, context, listener) => {
+      const tokens = exp.split(/\.|\?\.|\[|\]/);
+      if (!tokens[1]) {
+        if (context.tmpCtxName === tokens[0]) {
+        } else {
+          context.on && context.on(tokens[0], listener, true, parent);
+          parent.onRemoves = [
+            ...(parent.onRemoves || []),
+            () => {
+              context.off(tokens[0], listener, true);
+            },
+          ];
+        }
+        return;
+      }
+      if (context.tmpCtxName === tokens[0]) {
+        context = context[context.tmpCtxName];
+        tokens.shift();
+      }
+      const clearBind = (current) => {
+        while (current) {
+          if (current.off) {
+            current.off();
+          }
+          const next = current.next;
+          current.next = undefined;
+          current = next;
+        }
+      };
+      const register = (tokens, handler, context, offChain) => {
+        const prop = tokens[0];
+        if (!prop || !context) {
+          return;
+        }
+        offChain.next = {};
+        const registerNext = () => {
+          register(tokens.slice(1), handler, context[prop], offChain.next);
+        };
+        if (context.on && context.on instanceof Function) {
+          const listener = (...args) => {
+            clearBind(offChain.next);
+            offChain.next = {};
+            registerNext();
+            handler(...args);
+          };
+          context.on(prop, listener, true, parent);
+          offChain.off = () => {
+            context.off(prop, listener, true);
+          };
+        }
+        registerNext();
+      };
+      const offChain = {};
+      register(tokens, listener, context, offChain);
+      parent.onRemoves = [
+        ...(parent.onRemoves || []),
+        () => {
+          clearBind(offChain);
+        },
+      ];
+    };
+
+    const bindingForInstruction = (/**@type HTMLElement */ element) => {
+      let forExp = element.getAttribute("for.");
+      const match = forExp.match(
+        /^\s*(((let|const|of)\s+)?(\w+)\s+(of|in)\s+)?\s*(.+)\s*$/
+      );
+      if (!match || !match[6]) {
+        throw new Error("Invalid for Expression");
+      }
+      const collectionName = match[6];
+      const of_in = match[5] || "of";
+      let varName = match[4];
+      let forHead;
+      if (varName) {
+        forHead = `for(const ${varName} ${of_in} ${collectionName})`;
+      } else {
+        varName = "$$i";
+        forHead = `for(const ${varName} of ${collectionName})`;
+      }
+      const comment = document.createComment(element.outerHTML);
+      const parent = element.parentElement;
+      parent.insertBefore(comment, element);
+      element.remove();
+      /**@type Map<any, HTMLElement> */
+      let items = new Map();
+      /**@type Map<any, HTMLElement> */
+      let newItems = new Map();
+      let idx = 0;
+      let allRemoved = false;
+      const update = () => {
+        (function ($$forEach) {
+          newItems = new Map();
+          idx = 0;
+          allRemoved = false;
+          with (this) {
+            eval(`
+          let collection
+          try{
+            collection = this.${collectionName}
+          }
+          catch{
+            //ignore
+          }
+          if (collection) {
+            ${forHead}{
+              $$forEach(${varName})
+              }
+          }`);
+          }
+          for (const [_, { item }] of items) {
+            removeItem(item);
+          }
+          items = newItems;
+        }.call(element.context, ($$i) => {
+          /**@type HTMLElement */
+          let item;
+          if (items.has($$i)) {
+            const pair = items.get($$i);
+            item = pair.item;
+            if (!allRemoved && idx !== pair.idx) {
+              console.log("removed");
+              for (const [_, { item }] of items) {
+                removeItem(item);
+              }
+              allRemoved = true;
+            }
+            items.delete($$i);
+          } else {
+            item = element.cloneNode(true);
+            item.removeAttribute("id");
+            item.removeAttribute("for.");
+            if (item.updateModel) {
+              item.model = $$i;
+            } else {
+              item.modelBeforeInit = $$i;
+            }
+            const context = Object.create(element.context);
+            context[varName] = $$i;
+            context.tmpCtxName = varName;
+            item.context = context;
+          }
+          parent.insertBefore(item, comment);
+          newItems.set($$i, { idx, item });
+          binding(item);
+          idx++;
+        }));
+      };
+      update();
+      let lastContext = element.context;
+      comment.updateWhenModelChange = () => {
+        if (lastContext === element.context) {
+          return;
+        }
+        lastContext = element.context;
+        update();
+      };
+      onprop(parent, collectionName, element.context, update);
+      return {};
+    };
+
+    const bindingIfInstruction = (
+        /**@type HTMLElement */ element,
+      keyChangeRemove
+    ) => {
+      let ifExp = element.getAttribute("if.");
+      const comment = document.createComment(element.outerHTML);
+      const parent = element.parentElement;
+      parent.insertBefore(comment, element);
+      element.remove();
+      let item;
+      let lastValue;
+      const update = () => {
+        const value = evalInContext(ifExp, element.context);
+        if (keyChangeRemove && value !== lastValue && item) {
+          removeItem(item);
+          item = undefined;
+        }
+        if (value) {
+          if (item) {
+            return;
+          }
+          item = element.cloneNode(true);
+          item.removeAttribute("if.");
+          item.removeAttribute("keyif.");
+          parent.insertBefore(item, comment);
+          item.context = element.context;
+          binding(item);
+        } else if (item) {
+          removeItem(item);
+          item = null;
+        }
+      };
+      update();
+      let lastContext = element.context;
+      comment.updateWhenModelChange = () => {
+        if (lastContext === element.context) {
+          return;
+        }
+        lastContext = element.context;
+        update();
+      };
+      for (const exp of getPropsFromExp(ifExp)) {
+        onprop(parent, exp, element.context, update);
+      }
+      return {};
+    };
+
+    const getPropNameFromBindingAttr = (attr) => {
+      return attr.replace(/-(\w)/g, (_, c) => c.toUpperCase());
+    };
+
+    const getPropsFromExp = (exp) => {
+      return exp.match(/([a-zA-Z0-9_$.\[\]]|\?\.)+/g) || [];
+      // return exp.match(/[a-zA-Z0-9_$.]+/g) || []
+    };
+
+    const bindingAttrs = (/**@type HTMLElement */ element) => {
+      if (element.hasAttribute("for.")) {
+        return bindingForInstruction(element);
+      }
+      if (element.hasAttribute("if.")) {
+        return bindingIfInstruction(element, element.hasAttribute("keyif."));
+      }
+      if (element.updateWhenModelChange) {
+        element.updateWhenModelChange();
+        return element;
+      }
+      const bindingAttrs = element
+        .getAttributeNames()
+        .filter((p) => p.endsWith("."));
+      for (const prop of bindingAttrs) {
+        const $$exp = element.getAttribute(prop);
+        const effectedAttr = prop
+          .slice(0, -".".length)
+          .split(",")
+          .map((a) => a.trim())
+          .filter((a) => a);
+
+        if (effectedAttr.some((a) => a.startsWith("on"))) {
+          const value = `(function($event){with(this){${$$exp}}}).call(event.target.context, event)`;
+          for (const ea of effectedAttr) {
+            if (ea.endsWith("$")) {
+              element.setAttribute(
+                ea.slice(0, -1),
+                "event.stopPropagation();" + value
+              );
+            } else {
+              element.setAttribute(ea, value);
+            }
+          }
+          continue;
+        }
+        const update = () => {
+          const value = evalInContext($$exp, element.context);
+          for (const ea of effectedAttr) {
+            if (ea === "model") {
+              if (element.updateModel) {
+                element.updateModel(value);
+              } else {
+                element.modelBeforeInit = value;
+              }
+              continue;
+            }
+            if (ea === "focus") {
+              if (value) {
+                if (element.scrollIntoViewIfNeeded) {
+                  element.scrollIntoViewIfNeeded();
+                } else {
+                  element.scrollIntoView();
+                }
+                element.focus();
+              }
+              continue;
+            }
+            if (ea === "scrollintoview") {
+              if (value) {
+                if (element.scrollIntoViewIfNeeded) {
+                  element.scrollIntoViewIfNeeded();
+                } else {
+                  element.scrollIntoView();
+                }
+              }
+              continue;
+            }
+            if (ea.startsWith("class-")) {
+              const className = ea.slice("class-".length);
+              if (value) {
+                element.classList.add(className);
+              } else {
+                element.classList.remove(className);
+              }
+              continue;
+            } else if (ea.startsWith("style-")) {
+              const prop = ea.slice("style-".length, -1);
+              element.style.setProperty(prop, value);
+              continue;
+            }
+            if (ea.endsWith("$")) {
+              let prop = getPropNameFromBindingAttr(ea.slice(0, -1));
+              switch (prop) {
+                case "innerHtml":
+                  prop = "innerHTML";
+                  break;
+              }
+              element[prop] = value;
+              continue;
+            }
+            if (value === undefined || value === null) {
+              element.removeAttribute(ea);
+            } else if (element[ea] !== value) {
+              element.setAttribute(ea, value);
+            }
+          }
+        };
+        update();
+        for (const exp of getPropsFromExp($$exp)) {
+          onprop(element.parentElement, exp, element.context, update);
+        }
+      }
+      return element;
+    };
+
+    const binding = (/**@type HTMLElement */ element) => {
+      /**@type { Object.<string,HTMLElement> } */
+      const components = element.context.components;
+      if (element.hasAttribute) {
+        const handler = bindingAttrs(element);
+        //collect ids
+        if (element.hasAttribute("id")) {
+          components[element.getAttribute("id")] = handler;
+        }
+        if (handler !== element) {
+          return;
+        }
+      }
+      for (const child of [...element.children]) {
+        if (
+          child.context == element.context ||
+          (child.context &&
+            Object.getPrototypeOf(child.context) === element.context)
+        ) {
+        } else {
+          child.context = element.context;
+        }
+        binding(child);
+      }
+    };
+
+    const getNameFromTagName = (tagName) => {
+      return tagName.replace(/(?:^|-)(\w)/g, (_, c) => c.toUpperCase());
+    };
+
+    class DelayDispatcher {
+      constructor(delay = 50) {
+        this.delay = delay;
+        this.currentTask;
+        this.running = false;
+        this.lastDispatchTime = 0;
+        this.groups = new Map();
+        this.count = 0;
+        // this.delayListeners = new Map()
+      }
+
+      set(obj, key, method) {
+        let group = this.groups.get(obj);
+        if (!group) {
+          group = {};
+          this.groups.set(obj, group);
+        }
+        group[key] = method;
+      }
+
+      async start() {
+        if (this.running) {
+          return;
+        }
+        this.running = true;
+        this.currentTask = new Promise(async (resolve) => {
+          while (this.running) {
+            let now = Date.now();
+            let remain = this.delay - (now - this.lastDispatchTime);
+            if (remain > 0) {
+              await new Promise((r) => setTimeout(r, remain));
+            }
+            let groups = this.groups;
+            await new Promise((resolve) =>
+              window.requestAnimationFrame(async () => {
+                this.groups = new Map();
+                for (let [obj, group] of groups) {
+                  if (!obj || !group) {
+                    continue;
+                  }
+                  for (let p in group) {
+                    try {
+                      group[p]?.();
+                    } catch (e) {
+                      console.log(e);
+                    }
+                  }
+                }
+                resolve();
+              })
+            );
+          }
+          this.lastDispatchTime = Date.now();
+          this.currentTask = undefined;
+          this.running = false;
+          resolve();
+        });
+        await this.currentTask;
+      }
+
+      async stop() {
+        this.running = false;
+        await this.currentTask;
+      }
+
+      setDelay(delay) {
+        this.delay = delay;
+      }
+    }
+
+    const delayDispatcher = new DelayDispatcher();
+
+    const registerProperties = (obj, ...props) => {
+      const backup = {};
+      if (!obj.define) {
+        addPropChange(obj);
+      }
+      props.forEach((prop) => {
+        const desc = Object.getOwnPropertyDescriptor(obj, prop);
+        if (desc && !desc.configurable) {
+          delete backup[prop];
+          return;
+        }
+        let propValue;
+        let [propName, handler] =
+          prop instanceof Array ? prop : [prop, undefined];
+        if (obj[propName] !== undefined) {
+          backup[propName] = obj[propName];
+        }
+        Object.defineProperty(obj, propName, {
+          get() {
+            return propValue;
+          },
+          set(newValue) {
+            if (propValue === newValue) {
+              return;
+            }
+            const oldValue = propValue;
+            propValue = newValue;
+            obj.raise(propName, newValue, oldValue);
+            handler?.(newValue, oldValue);
+            delayDispatcher.set(obj, propName, () => {
+              obj.raise(propName, newValue, oldValue, true);
+            });
+          },
+        });
+      });
+      Object.assign(obj, backup);
+      return obj;
+    };
+
+    const registerAllProperties = (obj) => {
+      return registerProperties(obj, ...Object.keys(obj));
+    };
+
+    Object.defineProperty(Object.prototype, "registerProperties", {
+      value: function (...props) {
+        return registerProperties(this, ...props);
+      },
+    });
+
+    Object.defineProperty(Object.prototype, "registerAllProperties", {
+      value: function () {
+        return registerAllProperties(this);
+      },
+    });
+
+    delayDispatcher;
+
+    const addPropChange = (/**@type { Object } */ obj) => {
+      /**@type Map<string, Set<{(newValue, oldValue):any}>> */
+      const atonceListeners = new Map();
+      const delayListeners = new Map();
+      const thisProp = "this";
+      Object.defineProperty(obj, thisProp, {
+        get() {
+          return obj;
+        },
+      });
+      Object.defineProperty(obj, "define", {
+        value: (...props) => registerProperties(obj, ...props),
+      });
+      Object.defineProperty(obj, "on", {
+        value: (
+            /**@type string */ prop,
+          listener,
+          delay = false,
+          additional
+        ) => {
+          let l = delay ? delayListeners : atonceListeners;
+          if (!l.has(prop)) {
+            l.set(prop, new Map());
+          }
+          l.get(prop).set(listener, additional);
+          if (delay && delayDispatcher?.delayListeners) {
+            delayDispatcher.delayListeners.set(listener, additional);
+          }
+          delayDispatcher.count++;
+        },
+      });
+
+      Object.defineProperty(obj, "off", {
+        value: (prop, listener, delay = false) => {
+          let l = delay ? delayListeners : atonceListeners;
+          if (!l.has(prop)) {
+            return;
+          }
+          l.get(prop).delete(listener);
+          if (delay && delayDispatcher?.delayListeners) {
+            delayDispatcher.delayListeners.delete(listener);
+          }
+          delayDispatcher.count--;
+        },
+      });
+
+      Object.defineProperty(obj, "clearOn", {
+        value: (delay) => {
+          let l = delay ? delayListeners : atonceListeners;
+          delayDispatcher.count -= l.size;
+          if (delay && delayDispatcher?.delayListeners) {
+            l.forEach((_, listener) => {
+              delayDispatcher.delayListeners.delete(listener);
+            });
+          }
+          l.clear();
+          // for (let p in obj) {
+          //   obj[p].clearOn?.(delay)
+          // }
+        },
+      });
+      Object.defineProperty(obj, "dispose", {
+        value: () => {
+          obj.clearOn(false);
+          obj.clearOn(true);
+        },
+      });
+      Object.defineProperty(obj, "hasOn", {
+        value: (prop, delay = false) => {
+          let l = delay ? delayListeners : atonceListeners;
+          return l.has(prop);
+        },
+      });
+
+      Object.defineProperty(obj, "raise", {
+        value: (prop, newValue, oldValue, delay = false) => {
+          if (prop !== thisProp) {
+            obj.raise(thisProp, obj, obj, delay);
+          }
+          let l = delay ? delayListeners : atonceListeners;
+          if (!l.has(prop)) {
+            return;
+          }
+          for (const [listener, _] of l.get(prop)) {
+            listener(newValue, oldValue);
+          }
+        },
+      });
+    };
+
+    const registerElement = (tagName, /**@type { string } */ constructor) => {
+      const elementClassName = `HTML${constructor || getNameFromTagName(tagName)
+        }Element`;
+      constructor = constructor || "Object";
+      eval(`
+    class ${elementClassName} extends HTMLElement{
+      constructor(){
+        super()
+        const shadow = this.attachShadow({mode:'open'})
+        const template = document.getElementById('${tagName}')
+        if(!template || template.tagName !== 'TEMPLATE' ){
+          throw new Error('Define Template')
+        }
+        this.template_ = template
+        this.shadow_ = shadow
+        this.model_ = new ${constructor}()
+        this.model_.components = { host: this.shadow_ }
+        if(this.context && this.hasAttribute('model.')){
+          const modeExp = this.getAttribute('model.')
+          this.model = evalInContext(modeExp, this.context)
+        }else if(this.modelBeforeInit){
+          this.model = this.modelBeforeInit
+        }else{
+          this.model =  {}
+        }
+      }
+
+      rebuildView(){
+        this.shadow_.innerHTML = ''
+        const instance = document.importNode(this.template_.content, true)
+        this.shadow_.appendChild(instance)
+      }
+  
+      get model(){
+        return this.model_
+      }
+  
+      set model(value){
+        if(value?.on){
+          this.model_ = value || {}
+          this.model_.components = { host: this.shadow_ , ...this.model_.components||{}}
+        }else{
+          //combine code behind with model
+          Object.assign(this.model_, value)
+        }
+        this.shadow_.context = this.model_ 
+        this.rebuildView()
+      }
+  
+      updateModel(value){
+        this.model = value
+        this.connectedCallback()
+      }
+      
+      connectedCallback(){
+        binding(this.shadow_)
+        if(this.model_.launch){
+          this.model_.launch()
+        } 
+      }
+    }
+    customElements.define('${tagName}', ${elementClassName})
+    `);
+    };
+    return {
+      registerElement,
+      registerProperties,
+      evalInContext,
+      delayDispatcher,
+    };
+  })();
+
+  const sleep = (timeout) =>
+    new Promise((resolve) => setTimeout(resolve, timeout));
+
+  class AppBase {
+    async launch() {
+      if (this.launched) {
+        return;
+      }
+      this.launched = true;
+      this.storage = this.initStorage_();
+      this.data = await this.initData(window.appData);
+      window.app = this;
+      await this.start();
+    }
+
+    async registerStorageProperties(...props) {
+      if (!this.storage) {
+        return;
+      }
+      let asyncTimeout = 50;
+      const bgTimeout = 200;
+      for (const [prop, defaultValue, onchange] of props) {
+        let propValue;
+        let valueModified = false;
+        let successLoadFromStorage = false;
+        let loadFunc;
+        let bgLoad = false;
+        const mergeValue = (savedValue) => {
+          if (successLoadFromStorage) {
+            return;
+          }
+          successLoadFromStorage = true;
+          if (!valueModified) {
+            valueModified = true;
+            propValue = savedValue;
+          } else {
+            // merge strategy
+            propValue = savedValue;
+          }
+          if (bgLoad && onchange) {
+            onchange();
+          }
+        };
+        loadFunc = async () => {
+          const jsonStr = await this.storage.getItem(prop);
+          let savedValue;
+          if (!jsonStr) {
+            savedValue = defaultValue;
+          } else {
+            try {
+              savedValue = JSON.parse(jsonStr);
+            } catch {
+              savedValue = defaultValue;
+            }
+          }
+          mergeValue(savedValue);
+        };
+        const tryLoad = async () => {
+          bgLoad = true;
+          const func = loadFunc;
+          loadFunc = null;
+          await Promise.race([
+            func(),
+            sleep(bgTimeout).then(() => {
+              if (!successLoadFromStorage) {
+                loadFunc = func;
+              }
+            }),
+          ]);
+        };
+        await Promise.race([
+          loadFunc(),
+          sleep(asyncTimeout).then(() => {
+            if (!valueModified) {
+              propValue = defaultValue;
+              valueModified = true;
+              asyncTimeout = 0;
+            }
+          }),
+        ]);
+        Object.defineProperty(this, prop, {
+          get() {
+            if (loadFunc) {
+              tryLoad();
+            }
+            return propValue;
+          },
+          set(newValue) {
+            propValue = newValue;
+            if (successLoadFromStorage) {
+              this.storage.setItem(prop, JSON.stringify(propValue));
+            }
+          },
+        });
+      }
+    }
+
+    initStorage_() {
+      if (window.$localStorage) {
+        return window.$localStorage;
+      }
+      try {
+        const s = window.localStorage;
+        return s;
+      } catch {
+        return {
+          getItem: () => "",
+          setItem: () => true,
+        };
+      }
+    }
+
+    async initData(data) {
+      return data;
+    }
+
+    async start() {
+      console.log("start");
+    }
+
+    async pause() {
+      console.log("pause");
+    }
+
+    async resume() {
+      console.log("pause");
+    }
+
+    async stop() {
+      console.log("stop");
+    }
+  }
+
+  window.onload = async () => {
+    let currentClass = App;
+    while (true) {
+      let baseClass = Object.getPrototypeOf(currentClass);
+      if (
+        !baseClass ||
+        Object.getPrototypeOf(Object) === Object.getPrototypeOf(currentClass)
+      ) {
+        break;
+      }
+      currentClass = baseClass;
+    }
+    Object.setPrototypeOf(currentClass.prototype, AppBase.prototype);
+    for (const template of document.querySelectorAll(
+      "template[id][view-model]"
+    )) {
+      const tagName = template.getAttribute("id");
+      if (!tagName) {
+        continue;
+      }
+      const codeBehind = template.getAttribute("view-model");
+      registerElement(tagName, codeBehind);
+    }
+    delayDispatcher.start();
+  };
+</script>
+
+<style>
+  html,
+  body {
+    height: 100%;
+    margin: 0;
+  }
+</style>
+
+<body>
+  <app-main></app-main>
+
+  <template id="h-stack" view-model>
+    <slot></slot>
+    <style>
+      :host {
+        display: flex;
+        flex-direction: row;
+      }
+    </style>
+  </template>
+  <template id="v-stack" view-model>
+    <slot></slot>
+    <style>
+      :host {
+        display: flex;
+        flex-direction: column;
+      }
+    </style>
+  </template>
+  <template id="hv-stack" view-model>
+    <slot></slot>
+    <style>
+      :host {
+        display: flex;
+        flex-direction: column;
+      }
+
+      @media (orientation: landscape) {
+        :host {
+          flex-direction: row;
+        }
+      }
+    </style>
+  </template>
+
+  <template id="vh-stack" view-model>
+    <slot></slot>
+    <style>
+      :host {
+        display: flex;
+        flex-direction: row;
+      }
+
+      @media (orientation: landscape) {
+        :host {
+          flex-direction: column;
+        }
+      }
+    </style>
+  </template>
+
+  <template id="h-square" view-model>
+    <slot></slot>
+    <style>
+      :host {
+        width: 100vw;
+        height: 100vw;
+      }
+
+      @media (orientation: landscape) {
+        :host {
+          width: 100vh;
+          height: 100vh;
+        }
+      }
+    </style>
+  </template>
+
+  <template id="h-spacer" view-model>
+    <slot></slot>
+    <style>
+      :host {
+        flex: 1;
+        display: flex;
+      }
+    </style>
+  </template>
+
+  <template id="h-text" view-model>
+    <span inner-text$.="content"></span>
+    <style>
+      :host {
+        flex: 1;
+        display: flex;
+        align-items: center;
+        place-content: center;
+      }
+    </style>
+  </template>
+
+  <template id="play-button" view-model>
+    <span id="btnPlay" class="play-button" class-pause.="isPlaying"></span>
+    <style>
+      :host {
+        display: block;
+        border-radius: 5px;
+        padding: 3px 10px;
+        background-color: #fff4;
+      }
+
+      .play-button {
+        display: block;
+        width: 100%;
+        height: 100%;
+        background-color: var(--color);
+        clip-path: polygon(25% 10%, 25% 90%, 95% 50%, 25% 10%);
+        transition: 200ms all ease-in-out;
+      }
+
+      .play-button.pause {
+        clip-path: polygon(60% 50%,
+            20% 20%,
+            20% 80%,
+            60% 50%,
+            60% 80%,
+            80% 80%,
+            80% 20%,
+            60% 20%);
+      }
+    </style>
+  </template>
+
+  <template id="menu-bar" view-model>
+    <h-stack>
+      <div class-hidden.="!item.show" class="menu-item" for.="item of menus">
+        <span inner-text$.="item.name" onclick.="item.onclick()"></span>
+      </div>
+    </h-stack>
+    <style>
+      :host {
+        display: block;
+      }
+
+      h-stack {
+        overflow: hidden;
+      }
+
+      .menu-item {
+        margin: 5px;
+        background-color: var(--menu-background-color);
+        border-radius: 4px;
+        padding: 2px 5px;
+        color: var(--menu-color);
+        display: flex;
+        justify-content: center;
+        flex: 1;
+      }
+
+      .menu-item>span {
+        display: block;
+        text-overflow: ellipsis;
+        white-space: pre;
+        overflow: hidden;
+        max-width: 6em;
+      }
+
+      .hidden {
+        display: none;
+      }
+    </style>
+  </template>
+
+  <script>
+    class MenuItem {
+      constructor(name = "", onclick = null, show = true) {
+        registerProperties(this, "name", "show");
+        this.name = name;
+        this.show = show;
+        this.onclick = onclick;
+      }
+    }
+  </script>
+
+  <template id="modal-panel" view-model="Modal">
+    <div>
+      <span class="toastMessage" if.="toastMessage" inner-text$.="toastMessage"></span>
+      <div if.="open" class="modal-wraper" onclick.="close()">
+        <div class="modal" onclick="event.stopPropagation()">
+          <div class="title">
+            <span inner-text$.="title"></span>
+          </div>
+          <div class="body">
+            <div if.="items?.length">
+              <div class="item" for.="item of items" class-highlight.="item === selectedItem" onclick.="close(item)">
+                <span inner-text$.="options.itemName?item[options.itemName]:item"></span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <style>
+      .hidden {
+        /* left: -100%; */
+        /* transition: ease-in-out 0.05s left; */
+        display: none;
+      }
+
+      .toastMessage {
+        color: var(--toast-color, #eee);
+        background-color: var(--toast-background-color, #0008);
+        position: fixed;
+        bottom: 0;
+        margin: 20px auto;
+        left: 50%;
+        transform: translate(-50%, 0);
+        padding: 5px 20px;
+        border-radius: 4px;
+        text-align: center;
+        backdrop-filter: blur(5px);
+      }
+
+      .modal-wraper {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+
+      .modal {
+        background: #fff;
+        border-radius: 10px;
+        padding: 10px;
+        width: 90%;
+        max-height: 90%;
+        box-shadow: 3px 3px 5px;
+      }
+
+      .modal .title {
+        font-size: large;
+        margin: 5px 0;
+        font-weight: bold;
+      }
+
+      .modal .body {
+        margin: 5px 0;
+      }
+
+      .modal .foot {
+        margin: 5px 0;
+      }
+
+      .item {
+        margin: 8px 0;
+        background: #0002;
+        padding: 5px;
+        border-radius: 8px;
+      }
+
+      .item.highlight {
+        background: #0008;
+        color: white;
+      }
+    </style>
+  </template>
+  <script>
+    class Modal {
+      constructor() {
+        /**@type { Object.<string,HTMLElement> } */
+        this.components;
+        /**@type { Storage | {  } } */
+        this.storage;
+        registerProperties(
+          this,
+          "toastMessage",
+          "title",
+          "items",
+          "selectedItem",
+          "open",
+          "options"
+        );
+      }
+      toast(/**@string */ msg, /**@type number */ timeout = 1000, task) {
+        return new Promise(async (resolve) => {
+          this.toastMessage = msg;
+          await task;
+          setTimeout(() => {
+            this.toastMessage = null;
+            resolve();
+          }, timeout);
+        });
+      }
+
+      close(result) {
+        if (!this.resolveTask) {
+          return;
+        }
+        if (this.options.requilred && !result) {
+          return;
+        }
+        this.open = undefined;
+        this.resolveTask.resolve(result);
+      }
+
+      select(
+          /** @type string */ msg,
+          /** @type [any] */ values = [],
+        defaultIdx = 0,
+        opt = undefined
+      ) {
+        if (this.resolveTask) {
+          const { resolve, reject } = this.resolveTask;
+          this.resolveTask = undefined;
+          reject();
+        }
+        this.title = msg;
+        this.items = values;
+        this.selectedItem = values[defaultIdx];
+        this.options = opt || {};
+        this.open = true;
+        return new Promise(
+          (resolve, reject) => (this.resolveTask = { resolve, reject })
+        );
+      }
+    }
+  </script>
+  <template id="pop-up" view-model="Popup">
+    <div class="popup">
+      <slot></slot>
+    </div>
+    <style>
+      :host {
+        display: block;
+        position: relative;
+        left: 0;
+        top: 0;
+        bottom: 0;
+        right: 0;
+        position: fixed;
+        background: #0008;
+        backdrop-filter: blur(5px);
+      }
+
+      .popup {
+        max-width: 99%;
+        max-height: 99%;
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+      }
+    </style>
+  </template>
+  <script>
+    class Popup { }
+  </script>
+</body>
+
+<script>
+  const Api = window.os
+    ? {
+      appService: window.os.app,
+      localStorage: window.os.localStorage,
+    }
+    : {
+      appService: { close: () => { console.log('close') } },
+      localStorage: window.localStorage,
+    }
+    ;
+  class ShellAppEngineBase {
+
+    constructor() {
+      this.isRoot = false
+    }
+
+    async poweron(write) {
+
+    }
+
+    token(cmd) {
+      let tokens = []
+      let split = undefined
+      let current = ''
+      const pushToken = () => {
+        if (current.length) {
+          tokens.push(current)
+        }
+        current = ''
+      }
+      for (let i = 0; i < cmd.length; i++) {
+        let char = cmd[i]
+        if (!split && (char === ' ' || char === '\t')) {
+          pushToken()
+          continue
+        }
+        if (!split && (char === '"' || char === "'")) {
+          split = char
+          pushToken()
+          continue
+        }
+        if (split && char === split) {
+          pushToken()
+          split = undefined
+          continue
+        }
+        current = current + char
+      }
+      if (split) {
+        return [[], 'Invalid Input\n']
+      } else {
+        pushToken()
+      }
+      return [tokens]
+    }
+
+    async excuteCommand(command, apis) {
+      if (!command) {
+        return
+      }
+      const [[cmd, ...args], error] = this.token(command)
+      if (error) {
+        write(error, true)
+        return
+      }
+      console.log({ cmd, args, error })
+      const cmdName = '$' + cmd
+      if (typeof (this[cmdName]) !== 'function') {
+        apis.write(`CMD NOT FOUND: ${cmd}\n`)
+        return
+      }
+      await this[cmdName](apis, ...args)
+    }
+
+    async $help({ write, summary, usage }, commandName) {
+      if (summary) {
+        return `List all commands\n`
+      }
+      if (usage) {
+        return `Usage:\t help [command]\n`
+      }
+      if (!this.commands) {
+        const commands = {}
+        const commandNames = Object.getOwnPropertyNames(Object.getPrototypeOf(this)).filter(n => n.startsWith('$'))
+        for (let name of ['$help', ...commandNames]) {
+          const displayName = name.slice(1)
+          commands[displayName] = {
+            name: displayName,
+            summary: await this[name]({ summary: true }),
+            usage: await this[name]({ usage: true }),
+          }
+        }
+        this.commands = commands
+      }
+      if (!commandName) {
+        await write(Object.values(this.commands).map(({ name, summary }) => `\u{1b}[32m${name}\u{1b}[0m\t${summary}`).join(''))
+        return
+      }
+      const command = this.commands[commandName]
+      if (!command) {
+        await write(`No such command: ${commandName}\n`)
+        return
+      }
+
+      if (!command.usage) {
+        await write(`No usage for command: ${commandName}\n`)
+        return
+      }
+
+      await write(command.usage)
+    }
+
+    async poweroff() {
+
+    }
+
+    get prompt() {
+      return this.isRoot ? '# ' : '$ '
+    }
+
+  }
+
+  class AppEngine extends ShellAppEngineBase {
+    constructor() {
+      super()
+    }
+
+    centerText(apis, text, totalLineCount = undefined) {
+      const { getTerminalSize, isWideChar } = apis
+      const { width, height } = getTerminalSize()
+      totalLineCount = totalLineCount || height
+      text = text.slice(0, totalLineCount * width)
+      const lineCount = Math.ceil(text.length / width)
+      const perLine = text.length / lineCount
+      const centerLines = []
+      const paddingTop = Math.floor((totalLineCount - lineCount) / 2)
+      const emptyLine = ' '.repeat(width) + '\n'
+      const paddingBottom = totalLineCount - lineCount - paddingTop
+      for (let i = 0; i < lineCount; i++) {
+        let line = text.slice(i * perLine, (i + 1) * perLine)
+        let lineLength = Array.from(line, c => isWideChar(c) ? 2 : 1).reduce((s, v) => s + v, 0)
+        const paddingLeft = Math.floor((width - lineLength) / 2)
+        const paddingRight = width - lineLength - paddingLeft
+        const centerLine = ' '.repeat(paddingLeft) + line
+          + ' '.repeat(paddingRight)
+        centerLines.push(centerLine)
+      }
+      return [centerLines, paddingTop, paddingBottom, emptyLine]
+    }
+
+    formatCenterText(apis, text, bg, fg, totalLineCount = undefined) {
+      const [centerLines, paddingTop, paddingBottom, emptyLine] = this.centerText(apis, text, totalLineCount)
+      return (bg === undefined ? '' : `\u{1b}[4${bg}m`) + (fg === undefined ? '' : `\u{1b}[3${fg}m`)
+        + emptyLine.repeat(paddingTop)
+        + centerLines.join('\n') + '\n'
+        + emptyLine.repeat(paddingBottom)
+        + '\u{1b}[0m'
+    }
+
+    async setBackground(apis, bg) {
+      const { write, getTerminalSize } = apis
+      const { width, height } = getTerminalSize()
+      await write(`\u{1b}[s\u{1b}[0;0H\u{1b}[4${bg}m` +
+        (' '.repeat(width) + '\n').repeat(height)
+        + '\u{1b}[0m\u{1b}[u')
+    }
+
+    async gotoLineHead(apis) {
+      const { write, getTerminalSize } = apis
+      const { width, height } = getTerminalSize()
+      await write(`\u{1b}[${width}D`)
+    }
+
+    async poweron(apis) {
+      const { write } = apis
+      await write('\u{1b}[2J')
+      await this.setBackground(apis, 5)
+      const { width, height } = apis.getTerminalSize()
+      for (let i = 1; i < 10; i++) {
+        await write(`\u{1b}[0;${Math.floor((height - 1) / 2)}H`)
+        await write(this.formatCenterText(apis, `系统启动中...(${i * 10}/100)`, 5, 7, 1))
+        await sleep(50)
+      }
+      await write('\u{1b}[2J')
+      await this.setBackground(apis, 4)
+      for (let i = 3; i > 0; i--) {
+        await write(`\u{1b}[0;${Math.floor((height - 1) / 2)}H`)
+        await write(this.formatCenterText(apis, `系统启动失败(${i}秒后进入维护系统)`, 4, 7, 1))
+        await sleep(1000)
+      }
+      await write('\u{1b}[2J')
+      await write('你的电脑正\u{1b}[41m\u{1b}[37m遭受攻击\u{1b}[0m!\n请尽快修复\n输入\u{1b}[41m\u{1b}[37mhelp\u{1b}[0m命令获取帮助\n')
+    }
+
+    async $ls({ write, summary, usage }) {
+      if (summary) {
+        return `List all items\n`
+      }
+      if (usage) {
+        return `Usage:\t ls\n`
+      }
+      write('1,2,3,4,5\n')
+    }
+
+    async $do({ write, summary, usage }) {
+      if (summary) {
+        return `Do it yourself\n`
+      }
+      if (usage) {
+        return `Usage:\t do\n`
+      }
+      write('Do it yourself.\n')
+    }
+  }
+
+</script>
+<template id="app-engine" view-model="AppEngine">
+  <div></div>
+</template>
+
+</html>

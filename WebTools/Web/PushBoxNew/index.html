@@ -1,0 +1,2321 @@
+<html>
+  <meta charset="utf-8" />
+
+  <script>
+    class ResizeWatcher {
+      dispose() {
+        this.target_.removeEventListener("resize", this.onResize_);
+      }
+
+      constructor(target = window, delay = 0) {
+        /** @type Window & typeof globalThis */
+        this.target_ = target;
+        this.onResize_ = this.onResize_.bind(this);
+        this.target_.addEventListener("resize", this.onResize_);
+        this.resizeThreshold_ = 10;
+        this.callbacks_ = [];
+        this.isWatching_ = false;
+        this.checkThreshold_ = 200;
+        this.delay_ = delay;
+      }
+
+      register(callback) {
+        callback && this.callbacks_.push(callback);
+        if (!this.isWatching_) {
+          this.isWatching_ = true;
+          this.lastCheckTime_ = 0;
+          this.lastW_ = this.target_.innerWidth;
+          this.lastH_ = this.target_.innerHeight;
+        }
+      }
+
+      unregister(callback) {
+        if (!callback) {
+          return;
+        }
+        const idx = this.callbacks_.findIndex((c) => c === callback);
+        if (idx < 0) {
+          return;
+        }
+        this.callbacks_.splice(idx, 1);
+        if (this.callbacks_.length === 0) {
+          this.isWatching_ = false;
+        }
+      }
+
+      onResize_(/** @type UIEvent */ ev) {
+        if (!this.isWatching_) {
+          return;
+        }
+        const now = Date.now();
+        if (now - this.lastCheckTime_ < this.checkThreshold_) {
+          return;
+        }
+        this.lastCheckTime_ = now;
+        const raise = () => {
+          const w = this.target_.innerWidth;
+          const h = this.target_.innerHeight;
+
+          if (
+            Math.abs(this.lastW_ - w) < this.resizeThreshold_ &&
+            Math.abs(this.lastH_ - h) < this.resizeThreshold_
+          ) {
+            return;
+          }
+          this.lastW_ = w;
+          this.lastH_ = h;
+          for (const callback of this.callbacks_) {
+            callback(w, h);
+          }
+        };
+        if (!this.delay_) {
+          raise();
+        } else {
+          setTimeout(() => {
+            raise();
+          }, this.delay_);
+        }
+      }
+    }
+
+    const Api = {
+      appService: window.os.app,
+      localStorage: window.os.localStorage,
+    };
+    // javascript-astar 0.4.1
+    // http://github.com/bgrins/javascript-astar
+    // Freely distributable under the MIT License.
+    // Implements the astar search algorithm in javascript using a Binary Heap.
+    // Includes Binary Heap (with modifications) from Marijn Haverbeke.
+    // http://eloquentjavascript.net/appendix2.html
+
+    const { astarG, astar } = (function () {
+      function pathTo(node) {
+        var curr = node;
+        var path = [];
+        while (curr.parent) {
+          path.unshift(curr);
+          curr = curr.parent;
+        }
+        return path;
+      }
+
+      function getHeap() {
+        return new BinaryHeap(function (node) {
+          return node.f;
+        });
+      }
+
+      var astar = {
+        /**
+        * Perform an A* Search on a graph given a start and end node.
+        * @param {Graph} graph
+        * @param {GridNode} start
+        * @param {GridNode} end
+        * @param {Object} [options]
+        * @param {bool} [options.closest] Specifies whether to return the
+                   path to the closest node if the target is unreachable.
+        * @param {Function} [options.heuristic] Heuristic function (see
+        *          astar.heuristics).
+        */
+        search: function (graph, start, end, options) {
+          graph.cleanDirty();
+          options = options || {};
+          var heuristic = options.heuristic || astar.heuristics.manhattan;
+          var closest = options.closest || false;
+
+          var openHeap = getHeap();
+          var closestNode = start; // set the start node to be the closest if required
+
+          start.h = heuristic(start, end);
+          graph.markDirty(start);
+
+          openHeap.push(start);
+
+          while (openHeap.size() > 0) {
+            // Grab the lowest f(x) to process next.  Heap keeps this sorted for us.
+            var currentNode = openHeap.pop();
+
+            // End case -- result has been found, return the traced path.
+            if (currentNode === end) {
+              return pathTo(currentNode);
+            }
+
+            // Normal case -- move currentNode from open to closed, process each of its neighbors.
+            currentNode.closed = true;
+
+            // Find all neighbors for the current node.
+            var neighbors = graph.neighbors(currentNode);
+
+            for (var i = 0, il = neighbors.length; i < il; ++i) {
+              var neighbor = neighbors[i];
+
+              if (neighbor.closed || neighbor.isWall()) {
+                // Not a valid node to process, skip to next neighbor.
+                continue;
+              }
+
+              // The g score is the shortest distance from start to current node.
+              // We need to check if the path we have arrived at this neighbor is the shortest one we have seen yet.
+              var gScore = currentNode.g + neighbor.getCost(currentNode);
+              var beenVisited = neighbor.visited;
+
+              if (!beenVisited || gScore < neighbor.g) {
+                // Found an optimal (so far) path to this node.  Take score for node to see how good it is.
+                neighbor.visited = true;
+                neighbor.parent = currentNode;
+                neighbor.h = neighbor.h || heuristic(neighbor, end);
+                neighbor.g = gScore;
+                neighbor.f = neighbor.g + neighbor.h;
+                graph.markDirty(neighbor);
+                if (closest) {
+                  // If the neighbour is closer than the current closestNode or if it's equally close but has
+                  // a cheaper path than the current closest node then it becomes the closest node
+                  if (
+                    neighbor.h < closestNode.h ||
+                    (neighbor.h === closestNode.h && neighbor.g < closestNode.g)
+                  ) {
+                    closestNode = neighbor;
+                  }
+                }
+
+                if (!beenVisited) {
+                  // Pushing to heap will put it in proper place based on the 'f' value.
+                  openHeap.push(neighbor);
+                } else {
+                  // Already seen the node, but since it has been rescored we need to reorder it in the heap
+                  openHeap.rescoreElement(neighbor);
+                }
+              }
+            }
+          }
+
+          if (closest) {
+            return pathTo(closestNode);
+          }
+
+          // No result was found - empty array signifies failure to find path.
+          return [];
+        },
+        // See list of heuristics: http://theory.stanford.edu/~amitp/GameProgramming/Heuristics.html
+        heuristics: {
+          manhattan: function (pos0, pos1) {
+            var d1 = Math.abs(pos1.x - pos0.x);
+            var d2 = Math.abs(pos1.y - pos0.y);
+            return d1 + d2;
+          },
+          diagonal: function (pos0, pos1) {
+            var D = 1;
+            var D2 = Math.sqrt(2);
+            var d1 = Math.abs(pos1.x - pos0.x);
+            var d2 = Math.abs(pos1.y - pos0.y);
+            return D * (d1 + d2) + (D2 - 2 * D) * Math.min(d1, d2);
+          },
+        },
+        cleanNode: function (node) {
+          node.f = 0;
+          node.g = 0;
+          node.h = 0;
+          node.visited = false;
+          node.closed = false;
+          node.parent = null;
+        },
+      };
+
+      /**
+       * A graph memory structure
+       * @param {Array} gridIn 2D array of input weights
+       * @param {Object} [options]
+       * @param {bool} [options.diagonal] Specifies whether diagonal moves are allowed
+       */
+      function Graph(gridIn, options) {
+        options = options || {};
+        this.nodes = [];
+        this.diagonal = !!options.diagonal;
+        this.grid = [];
+        for (var x = 0; x < gridIn.length; x++) {
+          this.grid[x] = [];
+
+          for (var y = 0, row = gridIn[x]; y < row.length; y++) {
+            var node = new GridNode(x, y, row[y]);
+            this.grid[x][y] = node;
+            this.nodes.push(node);
+          }
+        }
+        this.init();
+      }
+
+      Graph.prototype.init = function () {
+        this.dirtyNodes = [];
+        for (var i = 0; i < this.nodes.length; i++) {
+          astar.cleanNode(this.nodes[i]);
+        }
+      };
+
+      Graph.prototype.cleanDirty = function () {
+        for (var i = 0; i < this.dirtyNodes.length; i++) {
+          astar.cleanNode(this.dirtyNodes[i]);
+        }
+        this.dirtyNodes = [];
+      };
+
+      Graph.prototype.markDirty = function (node) {
+        this.dirtyNodes.push(node);
+      };
+
+      Graph.prototype.neighbors = function (node) {
+        var ret = [];
+        var x = node.x;
+        var y = node.y;
+        var grid = this.grid;
+
+        // West
+        if (grid[x - 1] && grid[x - 1][y]) {
+          ret.push(grid[x - 1][y]);
+        }
+
+        // East
+        if (grid[x + 1] && grid[x + 1][y]) {
+          ret.push(grid[x + 1][y]);
+        }
+
+        // South
+        if (grid[x] && grid[x][y - 1]) {
+          ret.push(grid[x][y - 1]);
+        }
+
+        // North
+        if (grid[x] && grid[x][y + 1]) {
+          ret.push(grid[x][y + 1]);
+        }
+
+        if (this.diagonal) {
+          // Southwest
+          if (grid[x - 1] && grid[x - 1][y - 1]) {
+            ret.push(grid[x - 1][y - 1]);
+          }
+
+          // Southeast
+          if (grid[x + 1] && grid[x + 1][y - 1]) {
+            ret.push(grid[x + 1][y - 1]);
+          }
+
+          // Northwest
+          if (grid[x - 1] && grid[x - 1][y + 1]) {
+            ret.push(grid[x - 1][y + 1]);
+          }
+
+          // Northeast
+          if (grid[x + 1] && grid[x + 1][y + 1]) {
+            ret.push(grid[x + 1][y + 1]);
+          }
+        }
+
+        return ret;
+      };
+
+      Graph.prototype.toString = function () {
+        var graphString = [];
+        var nodes = this.grid;
+        for (var x = 0; x < nodes.length; x++) {
+          var rowDebug = [];
+          var row = nodes[x];
+          for (var y = 0; y < row.length; y++) {
+            rowDebug.push(row[y].weight);
+          }
+          graphString.push(rowDebug.join(" "));
+        }
+        return graphString.join("\n");
+      };
+
+      function GridNode(x, y, weight) {
+        this.x = x;
+        this.y = y;
+        this.weight = weight;
+      }
+
+      GridNode.prototype.toString = function () {
+        return "[" + this.x + " " + this.y + "]";
+      };
+
+      GridNode.prototype.getCost = function (fromNeighbor) {
+        // Take diagonal weight into consideration.
+        if (
+          fromNeighbor &&
+          fromNeighbor.x != this.x &&
+          fromNeighbor.y != this.y
+        ) {
+          return this.weight * 1.41421;
+        }
+        return this.weight;
+      };
+
+      GridNode.prototype.isWall = function () {
+        return this.weight === 0;
+      };
+
+      function BinaryHeap(scoreFunction) {
+        this.content = [];
+        this.scoreFunction = scoreFunction;
+      }
+
+      BinaryHeap.prototype = {
+        push: function (element) {
+          // Add the new element to the end of the array.
+          this.content.push(element);
+
+          // Allow it to sink down.
+          this.sinkDown(this.content.length - 1);
+        },
+        pop: function () {
+          // Store the first element so we can return it later.
+          var result = this.content[0];
+          // Get the element at the end of the array.
+          var end = this.content.pop();
+          // If there are any elements left, put the end element at the
+          // start, and let it bubble up.
+          if (this.content.length > 0) {
+            this.content[0] = end;
+            this.bubbleUp(0);
+          }
+          return result;
+        },
+        remove: function (node) {
+          var i = this.content.indexOf(node);
+
+          // When it is found, the process seen in 'pop' is repeated
+          // to fill up the hole.
+          var end = this.content.pop();
+
+          if (i !== this.content.length - 1) {
+            this.content[i] = end;
+
+            if (this.scoreFunction(end) < this.scoreFunction(node)) {
+              this.sinkDown(i);
+            } else {
+              this.bubbleUp(i);
+            }
+          }
+        },
+        size: function () {
+          return this.content.length;
+        },
+        rescoreElement: function (node) {
+          this.sinkDown(this.content.indexOf(node));
+        },
+        sinkDown: function (n) {
+          // Fetch the element that has to be sunk.
+          var element = this.content[n];
+
+          // When at 0, an element can not sink any further.
+          while (n > 0) {
+            // Compute the parent element's index, and fetch it.
+            var parentN = ((n + 1) >> 1) - 1;
+            var parent = this.content[parentN];
+            // Swap the elements if the parent is greater.
+            if (this.scoreFunction(element) < this.scoreFunction(parent)) {
+              this.content[parentN] = element;
+              this.content[n] = parent;
+              // Update 'n' to continue at the new position.
+              n = parentN;
+            }
+            // Found a parent that is less, no need to sink any further.
+            else {
+              break;
+            }
+          }
+        },
+        bubbleUp: function (n) {
+          // Look up the target element and its score.
+          var length = this.content.length;
+          var element = this.content[n];
+          var elemScore = this.scoreFunction(element);
+
+          while (true) {
+            // Compute the indices of the child elements.
+            var child2N = (n + 1) << 1;
+            var child1N = child2N - 1;
+            // This is used to store the new position of the element, if any.
+            var swap = null;
+            var child1Score;
+            // If the first child exists (is inside the array)...
+            if (child1N < length) {
+              // Look it up and compute its score.
+              var child1 = this.content[child1N];
+              child1Score = this.scoreFunction(child1);
+
+              // If the score is less than our element's, we need to swap.
+              if (child1Score < elemScore) {
+                swap = child1N;
+              }
+            }
+
+            // Do the same checks for the other child.
+            if (child2N < length) {
+              var child2 = this.content[child2N];
+              var child2Score = this.scoreFunction(child2);
+              if (child2Score < (swap === null ? elemScore : child1Score)) {
+                swap = child2N;
+              }
+            }
+
+            // If the element needs to be moved, swap it, and continue.
+            if (swap !== null) {
+              this.content[n] = this.content[swap];
+              this.content[swap] = element;
+              n = swap;
+            }
+            // Otherwise, we are done.
+            else {
+              break;
+            }
+          }
+        },
+      };
+
+      return {
+        astar: astar,
+        astarG: Graph,
+      };
+    })();
+    // import { sleep } from '../commons/sleep.js'
+
+    const CELL_TYPES = ["Empty", "Wall", "Worker"];
+
+    const CELL_DTYPES = ["None"];
+
+    const BOX_START_ID = 5;
+
+    class App {
+      constructor() {
+        /** @type { Object.<string,HTMLElement> } */
+        this.components; //txbLevel
+        registerProperties(
+          this,
+          "workers",
+          "boxes",
+          "currentLevel",
+          "cells",
+          "cellWidth",
+          "success",
+          "steps",
+          "showingLevels",
+          "levels",
+          "autoRunning"
+        );
+      }
+
+      async start() {
+        /** @type { { toast:(msg:string, timeout:number = 1000)=>Promise<any> } } */
+        this.modal_ = this.components.modal.model;
+        this.localStorage = Api.localStorage;
+        this.levels = this.data.levels.map((l, id) => ({ ...l, id: id + 1 }));
+        this.currentLevel = 1;
+        this.showingLevels = false;
+        try {
+          this.currentLevel =
+            JSON.parse(await this.localStorage.getItem("currentLevel")) || 1;
+        } catch {
+          //
+        }
+        await this.loadLevel();
+        new ResizeWatcher(window, 50).register(this.tryResize.bind(this));
+        window.addEventListener("keydown", this.onKeyDown.bind(this));
+      }
+
+      toggleShowLevels() {
+        this.showingLevels = !this.showingLevels;
+      }
+
+      async selectLevel() {
+        const level = 1 * this.components.txbLevel.value;
+        this.showingLevels = false;
+        if (isNaN(level) || level <= 0 || level > this.levels.length) {
+          return;
+        }
+        this.currentLevel = level;
+        await this.localStorage.setItem(
+          "currentLevel",
+          JSON.stringify(this.currentLevel)
+        );
+        this.loadLevel();
+      }
+
+      async loadLevel() {
+        if (this.currentLevel > this.levels.length) {
+          await this.modal_.toast("重新开始");
+          this.currentLevel = 1;
+          await this.localStorage.setItem(
+            "currentLevel",
+            JSON.stringify(this.currentLevel)
+          );
+        }
+        this.success = false;
+        this.steps = 0;
+        this.modal_.toast(`关卡 ${this.currentLevel}`);
+        this.workers = [];
+        this.boxes = new Set();
+        const levelData = this.levels[this.currentLevel - 1];
+        const dcells = levelData.dcells.split("\n").map((line) =>
+          Array.from(line, (c) => {
+            return CELL_DTYPES[c] !== undefined
+              ? CELL_DTYPES[c]
+              : `Box-${c - BOX_START_ID}`;
+          })
+        );
+        this.cells = levelData.cells.split("\n").map((line, y) =>
+          Array.from(line, (c, x) => {
+            let cell = { x, y, type: CELL_TYPES[c], dtype: dcells[y][x] };
+            if (CELL_TYPES[c] === "Worker") {
+              this.workers.push({ x, y });
+            }
+            if (CELL_TYPES[c] === undefined) {
+              let id = c - BOX_START_ID;
+              let boxCell = { x, y, id };
+              cell.type = `Box-${id}`;
+              this.boxes.add(boxCell);
+              if (cell.dtype === cell.type) {
+                boxCell.right = true;
+              }
+            }
+            return cell;
+          })
+        );
+        this.undos = [];
+        this.redos = [];
+        this.width = this.cells[0].length;
+        this.height = this.cells.length;
+        this.tryResize();
+      }
+
+      async getCommands(worker, target) {
+        const cells = this.cells.map((column) =>
+          column.map((c) => (c.type === "Empty" || c.type === "Worker" ? 1 : 0))
+        );
+        const graph = new astarG(cells);
+        const start = graph.grid[worker.y][worker.x];
+        const end = graph.grid[target.y][target.x];
+        const result = astar.search(graph, start, end);
+        const commands = [];
+        let current = start;
+        for (let i = 0; i < result.length; i++) {
+          commands.push({
+            dy: result[i].x - current.x,
+            dx: result[i].y - current.y,
+          });
+          current = result[i];
+        }
+        return commands;
+      }
+
+      async touchCell(cell) {
+        if (this.workers.length !== 1 || cell.type !== "Empty") {
+          return;
+        }
+        const worker = this.workers[0];
+        const commands = await this.getCommands(worker, cell);
+        if (!commands.length) {
+          return;
+        }
+        console.log(commands);
+        this.autoRunning = true;
+        for (let command of commands) {
+          await this.tryMove(command.dx, command.dy, true);
+          await sleep(200);
+        }
+        this.autoRunning = false;
+      }
+
+      async undo() {
+        if (this.undos.length <= 0) {
+          return;
+        }
+        const mem = this.undos.pop();
+        this.redos.push(this.getCurrentMem());
+        this.loadMem(this.cloneMem(mem));
+      }
+
+      loadMem(mem) {
+        this.cells = mem.cells;
+        this.boxes = mem.boxes;
+        this.steps = mem.steps;
+        this.workers = mem.workers;
+      }
+
+      getCurrentMem() {
+        return {
+          cells: this.cells,
+          workers: this.workers,
+          boxes: this.boxes,
+          steps: this.steps,
+        };
+      }
+
+      async redo() {
+        if (this.redos.length <= 0) {
+          return;
+        }
+        const mem = this.redos.pop();
+        this.undos.push(this.getCurrentMem());
+        this.loadMem(this.cloneMem(mem));
+      }
+
+      cloneMem({ cells, workers, boxes, steps }) {
+        const newCells = cells.map((l) => Array.from(l, (c) => ({ ...c })));
+        return {
+          cells: newCells,
+          workers: workers.map((w) => ({ ...w })),
+          boxes: new Set(Array.from(boxes, (c) => newCells[c.y][c.x])),
+          steps: steps,
+        };
+      }
+
+      async onKeyDown($event) {
+        switch ($event.code) {
+          case "ArrowLeft":
+            return await this.tryMove(-1, 0);
+          case "ArrowUp":
+            return await this.tryMove(0, -1);
+          case "ArrowRight":
+            return await this.tryMove(1, 0);
+          case "ArrowDown":
+            return await this.tryMove(0, 1);
+          default:
+            return;
+        }
+      }
+
+      async restart() {
+        await this.loadLevel();
+      }
+
+      async close() {
+        await Api.appService.close();
+      }
+      async tryMove(dx, dy, autoRunning) {
+        if (this.autoRunning && !autoRunning) {
+          return;
+        }
+        if (this.success) {
+          await this.loadLevel(this.currentLevel + 1);
+          return;
+        }
+        let moved = false;
+        this.workers = this.workers.sort(
+          (i, j) => -(i.x - j.x) * dx - (i.y - j.y) * dy
+        );
+        const mem = this.getCurrentMem();
+        let { cells, workers, boxes, steps } = this.cloneMem(mem);
+        for (let i = 0; i < this.workers.length; i++) {
+          let { x, y } = this.workers[i];
+          let cell = cells[y][x];
+          let nx = x + dx;
+          let ny = y + dy;
+          let ncell = cells[ny]?.[nx];
+          switch (ncell?.type) {
+            case "Empty":
+              ncell.type = cell.type;
+              cell.type = "Empty";
+              workers[i] = ncell;
+              moved = true;
+              continue;
+            case "Box-0":
+            case "Box-1":
+            case "Box-2":
+            case "Box-3":
+            case "Box-4":
+              let nnx = nx + dx;
+              let nny = ny + dy;
+              let nncell = cells[nny]?.[nnx];
+              if (nncell?.type !== "Empty") {
+                continue;
+              }
+              nncell.type = ncell.type;
+              ncell.type = cell.type;
+              cell.type = "Empty";
+              workers[i] = ncell;
+              boxes.delete(ncell);
+              ncell.right = undefined;
+              boxes.add(nncell);
+              nncell.right = nncell.dtype === nncell.type ? true : undefined;
+              moved = true;
+            default:
+              continue;
+          }
+        }
+        if (!moved) {
+          return;
+        }
+        this.undos.push(mem);
+        this.redos = [];
+        this.cells = cells;
+        this.boxes = boxes;
+        this.workers = workers;
+        this.steps = this.steps + 1;
+        for (let box of this.boxes) {
+          if (!box.right) {
+            return;
+          }
+        }
+        this.success = true;
+        this.modal_.toast("完成");
+        this.currentLevel = this.currentLevel + 1;
+        await this.localStorage.setItem(
+          "currentLevel",
+          JSON.stringify(this.currentLevel)
+        );
+      }
+
+      tryResize() {
+        this.cellWidth = Math.min(
+          Math.floor(window.innerWidth / this.width),
+          Math.floor(window.innerHeight / this.height)
+        );
+      }
+    }
+  </script>
+  <template id="app-main" view-model="App">
+    <div>
+      <div style---cell-width$.="cellWidth" class="app">
+        <div class="cells">
+          <div class="line" for.="line of cells">
+            <div
+              onclick.="touchCell(cell)"
+              class.="cell.type + ' ' + cell.dtype?.replace('Box', 'TargetBox') + ' cell'"
+              for.="cell of line"
+            >
+              <div class="declarator"></div>
+              <div class="object"></div>
+            </div>
+          </div>
+        </div>
+        <div class="menus">
+          <div>
+            <div></div>
+            <div class="Up icon-wraper" onclick.="tryMove(0, -1)">
+              <div class="icon"></div>
+            </div>
+            <div></div>
+          </div>
+          <div>
+            <div class="Left icon-wraper" onclick.="tryMove(-1, 0)">
+              <div class="icon"></div>
+            </div>
+            <div></div>
+            <div class="Right icon-wraper" onclick.="tryMove(1, 0)">
+              <div class="icon"></div>
+            </div>
+          </div>
+          <div>
+            <div></div>
+            <div class="Down icon-wraper" onclick.="tryMove(0, 1)">
+              <div class="icon"></div>
+            </div>
+            <div></div>
+          </div>
+        </div>
+        <div class="menus top">
+          <div>
+            <div onclick.="restart()" class="Restart icon-wraper">
+              <div class="icon"></div>
+            </div>
+            <div onclick.="undo()" class="Undo icon-wraper">
+              <div class="icon"></div>
+            </div>
+            <div class="info" onclick.="toggleShowLevels()">
+              <span inner-text$.="currentLevel"></span>关
+              <span inner-text$.="steps"></span>步
+            </div>
+            <div onclick.="redo()" class="Redo icon-wraper">
+              <div class="icon"></div>
+            </div>
+            <div onclick.="close()" class="Close icon-wraper">
+              <div class="icon"></div>
+            </div>
+          </div>
+        </div>
+        <div
+          if.="showingLevels"
+          class="levels-wraper"
+          onclick.="toggleShowLevels()"
+        >
+          <div class="levels" onclick="event.stopPropagation()">
+            <div>
+              跳到关卡：
+              <input
+                id="txbLevel"
+                type="number"
+                value$.="currentLevel"
+                max$.="levels.length"
+                min="1"
+              />
+              <input type="button" value="确定" onclick.="selectLevel()" />
+            </div>
+          </div>
+        </div>
+      </div>
+      <modal-panel id="modal"></modal-panel>
+    </div>
+    <style>
+      :host {
+        display: block;
+      }
+
+      .cells {
+        display: flex;
+        flex-direction: column;
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%) scale(0.9);
+        box-shadow: 5px 5px 10px;
+        border-radius: 10px;
+        overflow: hidden;
+        background: #ffffcc;
+      }
+
+      .line {
+        display: flex;
+        flex-direction: row;
+      }
+
+      .cell {
+        width: var(--cell-width);
+        height: var(--cell-width);
+        max-width: 4em;
+        max-height: 4em;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        position: relative;
+      }
+
+      .cell.Wall {
+        background: #e9ae6a;
+        box-shadow: 3px 3px 5px;
+      }
+
+      .declarator {
+        position: absolute;
+      }
+
+      .cell.TargetBox-0 > .declarator,
+      .cell.TargetBox-1 > .declarator,
+      .cell.TargetBox-2 > .declarator,
+      .cell.TargetBox-3 > .declarator,
+      .cell.TargetBox-4 > .declarator {
+        width: 90%;
+        height: 90%;
+        border-radius: 10px;
+        box-shadow: 1px 1px 2px inset;
+        opacity: 0.5;
+      }
+
+      .cell.Box-0 > .object,
+      .cell.Box-1 > .object,
+      .cell.Box-2 > .object,
+      .cell.Box-3 > .object,
+      .cell.Box-4 > .object,
+      .cell.Worker > .object {
+        width: 75%;
+        height: 75%;
+        border-radius: 10px;
+        box-shadow: 1px 1px 2px;
+        z-index: 1;
+      }
+
+      .cell.Worker > .object {
+        background: #cc9999;
+      }
+
+      .cell.Box-0 > .object,
+      .cell.TargetBox-0 > .declarator {
+        background: #99cc66;
+      }
+
+      .cell.Box-1 > .object,
+      .cell.TargetBox-1 > .declarator {
+        background: #ccccff;
+      }
+
+      .cell.Box-2 > .object,
+      .cell.TargetBox-2 > .declarator {
+        background: #99cccc;
+      }
+
+      .cell.Box-3 > .object,
+      .cell.TargetBox-3 > .declarator {
+        background: #e9ae6a;
+      }
+
+      .cell.Box-4 > .object,
+      .cell.TargetBox-4 > .declarator {
+        background: #cc9999;
+      }
+
+      .menus {
+        position: absolute;
+        bottom: 30px;
+        width: 100%;
+        opacity: 0.5;
+      }
+
+      .menus.top {
+        bottom: unset;
+        top: 50px;
+      }
+
+      .menus > div {
+        display: flex;
+        justify-content: center;
+      }
+
+      .menus > div > * {
+        width: 1.25em;
+        height: 1.25em;
+        font-size: 2.2rem;
+        margin: 5px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+
+      .menus > div > .icon-wraper {
+        background: #0008;
+        border-radius: 10px;
+        box-shadow: 1px 1px 2px #0008;
+      }
+
+      .icon {
+        width: 1em;
+        height: 1em;
+        background: #fff;
+        mask-size: cover;
+        -webkit-mask-size: cover;
+      }
+
+      .Left > .icon {
+        mask: url("data:image/svg+xml;base64,PD94bWwgdmVyc2lvbj0iMS4wIiBlbmNvZGluZz0idXRmLTgiPz4KPHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMDI0IDEwMjQiPgogIDxwYXRoIGQ9Ik02ODkgMTY1LjFMMzA4LjIgNDkzLjVjLTEwLjkgOS40LTEwLjkgMjcuNSAwIDM3TDY4OSA4NTguOWMxNC4yIDEyLjIgMzUgMS4yIDM1LTE4LjVWMTgzLjZjMC0xOS43LTIwLjgtMzAuNy0zNS0xOC41eiIvPgo8L3N2Zz4K");
+      }
+
+      .Up > .icon {
+        mask: url("data:image/svg+xml;base64,PD94bWwgdmVyc2lvbj0iMS4wIiBlbmNvZGluZz0idXRmLTgiPz4KPHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMDI0IDEwMjQiPgogIDxwYXRoIGQ9Ik04NTguOSA2ODlMNTMwLjUgMzA4LjJjLTkuNC0xMC45LTI3LjUtMTAuOS0zNyAwTDE2NS4xIDY4OWMtMTIuMiAxNC4yLTEuMiAzNSAxOC41IDM1aDY1Ni44YzE5LjcgMCAzMC43LTIwLjggMTguNS0zNXoiLz4KPC9zdmc+Cg==");
+      }
+
+      .Right > .icon {
+        mask: url("data:image/svg+xml;base64,PD94bWwgdmVyc2lvbj0iMS4wIiBlbmNvZGluZz0idXRmLTgiPz4KPHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMDI0IDEwMjQiPgogIDxwYXRoIGQ9Ik03MTUuOCA0OTMuNUwzMzUgMTY1LjFjLTE0LjItMTIuMi0zNS0xLjItMzUgMTguNXY2NTYuOGMwIDE5LjcgMjAuOCAzMC43IDM1IDE4LjVsMzgwLjgtMzI4LjRjMTAuOS05LjQgMTAuOS0yNy42IDAtMzd6Ii8+Cjwvc3ZnPgo=");
+      }
+
+      .Down > .icon {
+        mask: url("data:image/svg+xml;base64,PD94bWwgdmVyc2lvbj0iMS4wIiBlbmNvZGluZz0idXRmLTgiPz4KPHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMDI0IDEwMjQiPgogIDxwYXRoIGQ9Ik04NDAuNCAzMDBIMTgzLjZjLTE5LjcgMC0zMC43IDIwLjgtMTguNSAzNWwzMjguNCAzODAuOGM5LjQgMTAuOSAyNy41IDEwLjkgMzcgMEw4NTguOSAzMzVjMTIuMi0xNC4yIDEuMi0zNS0xOC41LTM1eiIvPgo8L3N2Zz4K");
+      }
+
+      .Restart > .icon {
+        mask: url("data:image/svg+xml;base64,PD94bWwgdmVyc2lvbj0iMS4wIiBzdGFuZGFsb25lPSJubyI/Pgo8c3ZnIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyIgY2xhc3M9Imljb24iIHZpZXdCb3g9IjAgMCAxMDI0IDEwMjQiPgogIDxwYXRoIGQ9Ik0xNjggNTA0LjJjMS00My43IDEwLTg2LjEgMjYuOS0xMjYgMTcuMy00MSA0Mi4xLTc3LjcgNzMuNy0xMDkuNFMzMzcgMjEyLjMgMzc4IDE5NWM0Mi40LTE3LjkgODcuNC0yNyAxMzMuOS0yN3M5MS41IDkuMSAxMzMuOCAyN0EzNDEuNSAzNDEuNSAwIDAgMSA3NTUgMjY4LjhjOS45IDkuOSAxOS4yIDIwLjQgMjcuOCAzMS40bC02MC4yIDQ3YTggOCAwIDAgMCAzIDE0LjFsMTc1LjcgNDNjNSAxLjIgOS45LTIuNiA5LjktNy43bC44LTE4MC45YzAtNi43LTcuNy0xMC41LTEyLjktNi4zbC01Ni40IDQ0LjFDNzY1LjggMTU1LjEgNjQ2LjIgOTIgNTExLjggOTIgMjgyLjcgOTIgOTYuMyAyNzUuNiA5MiA1MDMuOGE4IDggMCAwIDAgOCA4LjJoNjBjNC40IDAgNy45LTMuNSA4LTcuOHptNzU2IDcuOGgtNjBjLTQuNCAwLTcuOSAzLjUtOCA3LjgtMSA0My43LTEwIDg2LjEtMjYuOSAxMjYtMTcuMyA0MS00Mi4xIDc3LjgtNzMuNyAxMDkuNEEzNDIuNDUgMzQyLjQ1IDAgMCAxIDUxMi4xIDg1NmEzNDIuMjQgMzQyLjI0IDAgMCAxLTI0My4yLTEwMC44Yy05LjktOS45LTE5LjItMjAuNC0yNy44LTMxLjRsNjAuMi00N2E4IDggMCAwIDAtMy0xNC4xbC0xNzUuNy00M2MtNS0xLjItOS45IDIuNi05LjkgNy43bC0uNyAxODFjMCA2LjcgNy43IDEwLjUgMTIuOSA2LjNsNTYuNC00NC4xQzI1OC4yIDg2OC45IDM3Ny44IDkzMiA1MTIuMiA5MzJjMjI5LjIgMCA0MTUuNS0xODMuNyA0MTkuOC00MTEuOGE4IDggMCAwIDAtOC04LjJ6Ii8+Cjwvc3ZnPgo=");
+      }
+
+      .Close > .icon {
+        mask: url("data:image/svg+xml;base64,PD94bWwgdmVyc2lvbj0iMS4wIiBzdGFuZGFsb25lPSJubyI/Pgo8c3ZnIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyIgY2xhc3M9Imljb24iIHZpZXdCb3g9IjAgMCAxMDI0IDEwMjQiPgogIDxwYXRoIGQ9Ik03MDUuNiAxMjQuOWE4IDggMCAwIDAtMTEuNiA3LjJ2NjQuMmMwIDUuNSAyLjkgMTAuNiA3LjUgMTMuNmEzNTIuMiAzNTIuMiAwIDAgMSA2Mi4yIDQ5LjhjMzIuNyAzMi44IDU4LjQgNzAuOSA3Ni4zIDExMy4zYTM1NSAzNTUgMCAwIDEgMjcuOSAxMzguN2MwIDQ4LjEtOS40IDk0LjgtMjcuOSAxMzguN2EzNTUuOTIgMzU1LjkyIDAgMCAxLTc2LjMgMTEzLjMgMzUzLjA2IDM1My4wNiAwIDAgMS0xMTMuMiA3Ni40Yy00My44IDE4LjYtOTAuNSAyOC0xMzguNSAyOHMtOTQuNy05LjQtMTM4LjUtMjhhMzUzLjA2IDM1My4wNiAwIDAgMS0xMTMuMi03Ni40QTM1NS45MiAzNTUuOTIgMCAwIDEgMTg0IDY1MC40YTM1NSAzNTUgMCAwIDEtMjcuOS0xMzguN2MwLTQ4LjEgOS40LTk0LjggMjcuOS0xMzguNyAxNy45LTQyLjQgNDMuNi04MC41IDc2LjMtMTEzLjMgMTktMTkgMzkuOC0zNS42IDYyLjItNDkuOCA0LjctMi45IDcuNS04LjEgNy41LTEzLjZWMTMyYzAtNi02LjMtOS44LTExLjYtNy4yQzE3OC41IDE5NS4yIDgyIDMzOS4zIDgwIDUwNi4zIDc3LjIgNzQ1LjEgMjcyLjUgOTQzLjUgNTExLjIgOTQ0YzIzOSAuNSA0MzIuOC0xOTMuMyA0MzIuOC00MzIuNCAwLTE2OS4yLTk3LTMxNS43LTIzOC40LTM4Ni43ek00ODAgNTYwaDY0YzQuNCAwIDgtMy42IDgtOFY4OGMwLTQuNC0zLjYtOC04LThoLTY0Yy00LjQgMC04IDMuNi04IDh2NDY0YzAgNC40IDMuNiA4IDggOHoiLz4KPC9zdmc+Cg==");
+      }
+
+      .Undo > .icon {
+        mask: url("data:image/svg+xml;base64,PD94bWwgdmVyc2lvbj0iMS4wIiBzdGFuZGFsb25lPSJubyI/Pgo8c3ZnIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyIgY2xhc3M9Imljb24iIHZpZXdCb3g9IjAgMCAxMDI0IDEwMjQiPgogIDxwYXRoIGQ9Ik01MTEuNCAxMjRDMjkwLjUgMTI0LjMgMTEyIDMwMyAxMTIgNTIzLjljMCAxMjggNjAuMiAyNDIgMTUzLjggMzE1LjJsLTM3LjUgNDhjLTQuMSA1LjMtLjMgMTMgNi4zIDEyLjlsMTY3LS44YzUuMiAwIDktNC45IDcuNy05LjlMMzY5LjggNzI3YTggOCAwIDAgMC0xNC4xLTNMMzE1IDc3Ni4xYy0xMC4yLTgtMjAtMTYuNy0yOS4zLTI2YTMxOC42NCAzMTguNjQgMCAwIDEtNjguNi0xMDEuN0MyMDAuNCA2MDkgMTkyIDU2Ny4xIDE5MiA1MjMuOXM4LjQtODUuMSAyNS4xLTEyNC41YzE2LjEtMzguMSAzOS4yLTcyLjMgNjguNi0xMDEuNyAyOS40LTI5LjQgNjMuNi01Mi41IDEwMS43LTY4LjZDNDI2LjkgMjEyLjQgNDY4LjggMjA0IDUxMiAyMDRzODUuMSA4LjQgMTI0LjUgMjUuMWMzOC4xIDE2LjEgNzIuMyAzOS4yIDEwMS43IDY4LjYgMjkuNCAyOS40IDUyLjUgNjMuNiA2OC42IDEwMS43IDE2LjcgMzkuNCAyNS4xIDgxLjMgMjUuMSAxMjQuNXMtOC40IDg1LjEtMjUuMSAxMjQuNWEzMTguNjQgMzE4LjY0IDAgMCAxLTY4LjYgMTAxLjdjLTcuNSA3LjUtMTUuMyAxNC41LTIzLjQgMjEuMmE3LjkzIDcuOTMgMCAwIDAtMS4yIDExLjFsMzkuNCA1MC41YzIuOCAzLjUgNy45IDQuMSAxMS40IDEuM0M4NTQuNSA3NjAuOCA5MTIgNjQ5LjEgOTEyIDUyMy45YzAtMjIxLjEtMTc5LjQtNDAwLjItNDAwLjYtMzk5Ljl6Ii8+Cjwvc3ZnPgo=");
+      }
+
+      .Redo > .icon {
+        mask: url("data:image/svg+xml;base64,PD94bWwgdmVyc2lvbj0iMS4wIiBzdGFuZGFsb25lPSJubyI/Pgo8c3ZnIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyIgY2xhc3M9Imljb24iIHZpZXdCb3g9IjAgMCAxMDI0IDEwMjQiPgogIDxwYXRoIGQ9Ik03NTguMiA4MzkuMUM4NTEuOCA3NjUuOSA5MTIgNjUxLjkgOTEyIDUyMy45IDkxMiAzMDMgNzMzLjUgMTI0LjMgNTEyLjYgMTI0IDI5MS40IDEyMy43IDExMiAzMDIuOCAxMTIgNTIzLjljMCAxMjUuMiA1Ny41IDIzNi45IDE0Ny42IDMxMC4yIDMuNSAyLjggOC42IDIuMiAxMS40LTEuM2wzOS40LTUwLjVjMi43LTMuNCAyLjEtOC4zLTEuMi0xMS4xLTguMS02LjYtMTUuOS0xMy43LTIzLjQtMjEuMmEzMTguNjQgMzE4LjY0IDAgMCAxLTY4LjYtMTAxLjdDMjAwLjQgNjA5IDE5MiA1NjcuMSAxOTIgNTIzLjlzOC40LTg1LjEgMjUuMS0xMjQuNWMxNi4xLTM4LjEgMzkuMi03Mi4zIDY4LjYtMTAxLjcgMjkuNC0yOS40IDYzLjYtNTIuNSAxMDEuNy02OC42QzQyNi45IDIxMi40IDQ2OC44IDIwNCA1MTIgMjA0czg1LjEgOC40IDEyNC41IDI1LjFjMzguMSAxNi4xIDcyLjMgMzkuMiAxMDEuNyA2OC42IDI5LjQgMjkuNCA1Mi41IDYzLjYgNjguNiAxMDEuNyAxNi43IDM5LjQgMjUuMSA4MS4zIDI1LjEgMTI0LjVzLTguNCA4NS4xLTI1LjEgMTI0LjVhMzE4LjY0IDMxOC42NCAwIDAgMS02OC42IDEwMS43Yy05LjMgOS4zLTE5LjEgMTgtMjkuMyAyNkw2NjguMiA3MjRhOCA4IDAgMCAwLTE0LjEgM2wtMzkuNiAxNjIuMmMtMS4yIDUgMi42IDkuOSA3LjcgOS45bDE2NyAuOGM2LjcgMCAxMC41LTcuNyA2LjMtMTIuOWwtMzcuMy00Ny45eiIvPgo8L3N2Zz4K");
+      }
+
+      .menus > div > .info {
+        font-size: 1rem;
+        width: 5.5em;
+        height: 2.75em;
+        font-weight: bold;
+      }
+
+      .info > span {
+        padding: 5px;
+      }
+
+      .levels-wraper {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: #fff8;
+        backdrop-filter: blur(1px);
+        -webkit-backdrop-filter: blur(1px);
+      }
+
+      .levels {
+        background: #fff8;
+        box-shadow: 3px 3px 5px;
+        border-radius: 10px;
+        overflow-y: scroll;
+        padding: 10px 20px;
+        font-size: large;
+      }
+
+      .levels input {
+        font-size: large;
+      }
+    </style>
+  </template>
+  <style>
+    body {
+      background-image: radial-gradient(
+          #ffcccc,
+          rgba(255, 255, 255, 0.2) 40px,
+          transparent 80px
+        ),
+        radial-gradient(
+          #ccccff,
+          rgba(255, 255, 255, 0.3) 30px,
+          transparent 100px
+        ),
+        radial-gradient(
+          #99cccc,
+          rgba(255, 255, 255, 0.2) 30px,
+          transparent 100px
+        );
+      background-size: 300px 300px, 200px 200px, 300px 300px;
+      background-position: 0 0, 20px 40px, 70px 30px, 60px 80px;
+    }
+  </style>
+  <script>
+    window.appData = window.appData || {
+      levels: [
+        {
+          cells: "2500\n0600\n0000\n0000",
+          dcells: "0056\n0056\n0000\n0000",
+        },
+      ],
+    };
+  </script>
+
+  <meta
+    name="viewport"
+    content="width=device-width, maximum-scale=1.0,user-scalable=no, initial-scale=1"
+  />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="transparent" />
+  <script>
+    const {
+      registerElement,
+      registerProperties,
+      evalInContext,
+      delayDispatcher,
+    } = (() => {
+      const evalInContext = (exp, context) => {
+        return function () {
+          with (this) {
+            try {
+              return eval(`(${exp})`);
+            } catch (e) {
+              console.log(exp);
+              console.log(e);
+              return;
+            }
+          }
+        }.call(context);
+      };
+
+      const removeItem = (item) => {
+        const clearItem = (/**@type {HTMLElement}*/ item) => {
+          for (let c of item.childNodes) {
+            clearItem(c);
+          }
+          let onRemoves = item.onRemoves;
+          item.onRemoves = undefined;
+          if (onRemoves?.length) {
+            onRemoves.forEach((onRemove) => onRemove());
+          }
+        };
+        clearItem(item);
+        item.remove();
+      };
+
+      const onprop = (parent, /**@type {String} */ exp, context, listener) => {
+        const tokens = exp.split(/\.|\?\.|\[|\]/);
+        if (!tokens[1]) {
+          if (context.tmpCtxName === tokens[0]) {
+          } else {
+            context.on && context.on(tokens[0], listener, true, parent);
+            parent.onRemoves = [
+              ...(parent.onRemoves || []),
+              () => {
+                context.off(tokens[0], listener, true);
+              },
+            ];
+          }
+          return;
+        }
+        if (context.tmpCtxName === tokens[0]) {
+          context = context[context.tmpCtxName];
+          tokens.shift();
+        }
+        const clearBind = (current) => {
+          while (current) {
+            if (current.off) {
+              current.off();
+            }
+            const next = current.next;
+            current.next = undefined;
+            current = next;
+          }
+        };
+        const register = (tokens, handler, context, offChain) => {
+          const prop = tokens[0];
+          if (!prop || !context) {
+            return;
+          }
+          offChain.next = {};
+          const registerNext = () => {
+            register(tokens.slice(1), handler, context[prop], offChain.next);
+          };
+          if (context.on && context.on instanceof Function) {
+            const listener = (...args) => {
+              clearBind(offChain.next);
+              offChain.next = {};
+              registerNext();
+              handler(...args);
+            };
+            context.on(prop, listener, true, parent);
+            offChain.off = () => {
+              context.off(prop, listener, true);
+            };
+          }
+          registerNext();
+        };
+        const offChain = {};
+        register(tokens, listener, context, offChain);
+        parent.onRemoves = [
+          ...(parent.onRemoves || []),
+          () => {
+            clearBind(offChain);
+          },
+        ];
+      };
+
+      const bindingForInstruction = (/**@type HTMLElement */ element) => {
+        let forExp = element.getAttribute("for.");
+        const match = forExp.match(
+          /^\s*(((let|const|of)\s+)?(\w+)\s+(of|in)\s+)?\s*(.+)\s*$/
+        );
+        if (!match || !match[6]) {
+          throw new Error("Invalid for Expression");
+        }
+        const collectionName = match[6];
+        const of_in = match[5] || "of";
+        let varName = match[4];
+        let forHead;
+        if (varName) {
+          forHead = `for(const ${varName} ${of_in} ${collectionName})`;
+        } else {
+          varName = "$$i";
+          forHead = `for(const ${varName} of ${collectionName})`;
+        }
+        const comment = document.createComment(element.outerHTML);
+        const parent = element.parentElement;
+        parent.insertBefore(comment, element);
+        element.remove();
+        /**@type Map<any, HTMLElement> */
+        let items = new Map();
+        /**@type Map<any, HTMLElement> */
+        let newItems = new Map();
+        let idx = 0;
+        let allRemoved = false;
+        const update = () => {
+          (function ($$forEach) {
+            newItems = new Map();
+            idx = 0;
+            allRemoved = false;
+            with (this) {
+              eval(`
+          let collection
+          try{
+            collection = this.${collectionName}
+          }
+          catch{
+            //ignore
+          }
+          if (collection) {
+            ${forHead}{
+              $$forEach(${varName})
+              }
+          }`);
+            }
+            for (const [_, { item }] of items) {
+              removeItem(item);
+            }
+            items = newItems;
+          }.call(element.context, ($$i) => {
+            /**@type HTMLElement */
+            let item;
+            if (items.has($$i)) {
+              const pair = items.get($$i);
+              item = pair.item;
+              if (!allRemoved && idx !== pair.idx) {
+                console.log("removed");
+                for (const [_, { item }] of items) {
+                  removeItem(item);
+                }
+                allRemoved = true;
+              }
+              items.delete($$i);
+            } else {
+              item = element.cloneNode(true);
+              item.removeAttribute("id");
+              item.removeAttribute("for.");
+              if (item.updateModel) {
+                item.model = $$i;
+              } else {
+                item.modelBeforeInit = $$i;
+              }
+              const context = Object.create(element.context);
+              context[varName] = $$i;
+              context.tmpCtxName = varName;
+              item.context = context;
+            }
+            parent.insertBefore(item, comment);
+            newItems.set($$i, { idx, item });
+            binding(item);
+            idx++;
+          }));
+        };
+        update();
+        let lastContext = element.context;
+        comment.updateWhenModelChange = () => {
+          if (lastContext === element.context) {
+            return;
+          }
+          lastContext = element.context;
+          update();
+        };
+        onprop(parent, collectionName, element.context, update);
+        return {};
+      };
+
+      const bindingIfInstruction = (
+        /**@type HTMLElement */ element,
+        keyChangeRemove
+      ) => {
+        let ifExp = element.getAttribute("if.");
+        const comment = document.createComment(element.outerHTML);
+        const parent = element.parentElement;
+        parent.insertBefore(comment, element);
+        element.remove();
+        let item;
+        let lastValue;
+        const update = () => {
+          const value = evalInContext(ifExp, element.context);
+          if (keyChangeRemove && value !== lastValue && item) {
+            removeItem(item);
+            item = undefined;
+          }
+          if (value) {
+            if (item) {
+              return;
+            }
+            item = element.cloneNode(true);
+            item.removeAttribute("if.");
+            item.removeAttribute("keyif.");
+            parent.insertBefore(item, comment);
+            item.context = element.context;
+            binding(item);
+          } else if (item) {
+            removeItem(item);
+            item = null;
+          }
+        };
+        update();
+        let lastContext = element.context;
+        comment.updateWhenModelChange = () => {
+          if (lastContext === element.context) {
+            return;
+          }
+          lastContext = element.context;
+          update();
+        };
+        for (const exp of getPropsFromExp(ifExp)) {
+          onprop(parent, exp, element.context, update);
+        }
+        return {};
+      };
+
+      const getPropNameFromBindingAttr = (attr) => {
+        return attr.replace(/-(\w)/g, (_, c) => c.toUpperCase());
+      };
+
+      const getPropsFromExp = (exp) => {
+        return exp.match(/([a-zA-Z0-9_$.\[\]]|\?\.)+/g) || [];
+        // return exp.match(/[a-zA-Z0-9_$.]+/g) || []
+      };
+
+      const bindingAttrs = (/**@type HTMLElement */ element) => {
+        if (element.hasAttribute("for.")) {
+          return bindingForInstruction(element);
+        }
+        if (element.hasAttribute("if.")) {
+          return bindingIfInstruction(element, element.hasAttribute("keyif."));
+        }
+        if (element.updateWhenModelChange) {
+          element.updateWhenModelChange();
+          return element;
+        }
+        const bindingAttrs = element
+          .getAttributeNames()
+          .filter((p) => p.endsWith("."));
+        for (const prop of bindingAttrs) {
+          const $$exp = element.getAttribute(prop);
+          const effectedAttr = prop
+            .slice(0, -".".length)
+            .split(",")
+            .map((a) => a.trim())
+            .filter((a) => a);
+
+          if (effectedAttr.some((a) => a.startsWith("on"))) {
+            const value = `(function($event){with(this){${$$exp}}}).call(event.target.context, event)`;
+            for (const ea of effectedAttr) {
+              if (ea.endsWith("$")) {
+                element.setAttribute(
+                  ea.slice(0, -1),
+                  "event.stopPropagation();" + value
+                );
+              } else {
+                element.setAttribute(ea, value);
+              }
+            }
+            continue;
+          }
+          const update = () => {
+            const value = evalInContext($$exp, element.context);
+            for (const ea of effectedAttr) {
+              if (ea === "model") {
+                if (element.updateModel) {
+                  element.updateModel(value);
+                } else {
+                  element.modelBeforeInit = value;
+                }
+                continue;
+              }
+              if (ea === "focus") {
+                if (value) {
+                  if (element.scrollIntoViewIfNeeded) {
+                    element.scrollIntoViewIfNeeded();
+                  } else {
+                    element.scrollIntoView();
+                  }
+                  element.focus();
+                }
+                continue;
+              }
+              if (ea === "scrollintoview") {
+                if (value) {
+                  if (element.scrollIntoViewIfNeeded) {
+                    element.scrollIntoViewIfNeeded();
+                  } else {
+                    element.scrollIntoView();
+                  }
+                }
+                continue;
+              }
+              if (ea.startsWith("class-")) {
+                const className = ea.slice("class-".length);
+                if (value) {
+                  element.classList.add(className);
+                } else {
+                  element.classList.remove(className);
+                }
+                continue;
+              } else if (ea.startsWith("style-")) {
+                const prop = ea.slice("style-".length, -1);
+                element.style.setProperty(prop, value);
+                continue;
+              }
+              if (ea.endsWith("$")) {
+                let prop = getPropNameFromBindingAttr(ea.slice(0, -1));
+                switch (prop) {
+                  case "innerHtml":
+                    prop = "innerHTML";
+                    break;
+                }
+                element[prop] = value;
+                continue;
+              }
+              if (value === undefined || value === null) {
+                element.removeAttribute(ea);
+              } else if (element[ea] !== value) {
+                element.setAttribute(ea, value);
+              }
+            }
+          };
+          update();
+          for (const exp of getPropsFromExp($$exp)) {
+            onprop(element.parentElement, exp, element.context, update);
+          }
+        }
+        return element;
+      };
+
+      const binding = (/**@type HTMLElement */ element) => {
+        /**@type { Object.<string,HTMLElement> } */
+        const components = element.context.components;
+        if (element.hasAttribute) {
+          const handler = bindingAttrs(element);
+          //collect ids
+          if (element.hasAttribute("id")) {
+            components[element.getAttribute("id")] = handler;
+          }
+          if (handler !== element) {
+            return;
+          }
+        }
+        for (const child of [...element.children]) {
+          if (
+            child.context == element.context ||
+            (child.context &&
+              Object.getPrototypeOf(child.context) === element.context)
+          ) {
+          } else {
+            child.context = element.context;
+          }
+          binding(child);
+        }
+      };
+
+      const getNameFromTagName = (tagName) => {
+        return tagName.replace(/(?:^|-)(\w)/g, (_, c) => c.toUpperCase());
+      };
+
+      class DelayDispatcher {
+        constructor(delay = 50) {
+          this.delay = delay;
+          this.currentTask;
+          this.running = false;
+          this.lastDispatchTime = 0;
+          this.groups = new Map();
+          this.count = 0;
+          // this.delayListeners = new Map()
+        }
+
+        set(obj, key, method) {
+          let group = this.groups.get(obj);
+          if (!group) {
+            group = {};
+            this.groups.set(obj, group);
+          }
+          group[key] = method;
+        }
+
+        async start() {
+          if (this.running) {
+            return;
+          }
+          this.running = true;
+          this.currentTask = new Promise(async (resolve) => {
+            while (this.running) {
+              let now = Date.now();
+              let remain = this.delay - (now - this.lastDispatchTime);
+              if (remain > 0) {
+                await new Promise((r) => setTimeout(r, remain));
+              }
+              let groups = this.groups;
+              await new Promise((resolve) =>
+                window.requestAnimationFrame(async () => {
+                  this.groups = new Map();
+                  for (let [obj, group] of groups) {
+                    if (!obj || !group) {
+                      continue;
+                    }
+                    for (let p in group) {
+                      try {
+                        group[p]?.();
+                      } catch (e) {
+                        console.log(e);
+                      }
+                    }
+                  }
+                  resolve();
+                })
+              );
+            }
+            this.lastDispatchTime = Date.now();
+            this.currentTask = undefined;
+            this.running = false;
+            resolve();
+          });
+          await this.currentTask;
+        }
+
+        async stop() {
+          this.running = false;
+          await this.currentTask;
+        }
+
+        setDelay(delay) {
+          this.delay = delay;
+        }
+      }
+
+      const delayDispatcher = new DelayDispatcher();
+
+      const registerProperties = (obj, ...props) => {
+        const backup = {};
+        if (!obj.define) {
+          addPropChange(obj);
+        }
+        props.forEach((prop) => {
+          const desc = Object.getOwnPropertyDescriptor(obj, prop);
+          if (desc && !desc.configurable) {
+            delete backup[prop];
+            return;
+          }
+          let propValue;
+          let [propName, handler] =
+            prop instanceof Array ? prop : [prop, undefined];
+          if (obj[propName] !== undefined) {
+            backup[propName] = obj[propName];
+          }
+          Object.defineProperty(obj, propName, {
+            get() {
+              return propValue;
+            },
+            set(newValue) {
+              if (propValue === newValue) {
+                return;
+              }
+              const oldValue = propValue;
+              propValue = newValue;
+              obj.raise(propName, newValue, oldValue);
+              handler?.(newValue, oldValue);
+              delayDispatcher.set(obj, propName, () => {
+                obj.raise(propName, newValue, oldValue, true);
+              });
+            },
+          });
+        });
+        Object.assign(obj, backup);
+        return obj;
+      };
+
+      const registerAllProperties = (obj) => {
+        return registerProperties(obj, ...Object.keys(obj));
+      };
+
+      Object.defineProperty(Object.prototype, "registerProperties", {
+        value: function (...props) {
+          return registerProperties(this, ...props);
+        },
+      });
+
+      Object.defineProperty(Object.prototype, "registerAllProperties", {
+        value: function () {
+          return registerAllProperties(this);
+        },
+      });
+
+      delayDispatcher;
+
+      const addPropChange = (/**@type { Object } */ obj) => {
+        /**@type Map<string, Set<{(newValue, oldValue):any}>> */
+        const atonceListeners = new Map();
+        const delayListeners = new Map();
+        const thisProp = "this";
+        Object.defineProperty(obj, thisProp, {
+          get() {
+            return obj;
+          },
+        });
+        Object.defineProperty(obj, "define", {
+          value: (...props) => registerProperties(obj, ...props),
+        });
+        Object.defineProperty(obj, "on", {
+          value: (
+            /**@type string */ prop,
+            listener,
+            delay = false,
+            additional
+          ) => {
+            let l = delay ? delayListeners : atonceListeners;
+            if (!l.has(prop)) {
+              l.set(prop, new Map());
+            }
+            l.get(prop).set(listener, additional);
+            if (delay && delayDispatcher?.delayListeners) {
+              delayDispatcher.delayListeners.set(listener, additional);
+            }
+            delayDispatcher.count++;
+          },
+        });
+
+        Object.defineProperty(obj, "off", {
+          value: (prop, listener, delay = false) => {
+            let l = delay ? delayListeners : atonceListeners;
+            if (!l.has(prop)) {
+              return;
+            }
+            l.get(prop).delete(listener);
+            if (delay && delayDispatcher?.delayListeners) {
+              delayDispatcher.delayListeners.delete(listener);
+            }
+            delayDispatcher.count--;
+          },
+        });
+
+        Object.defineProperty(obj, "clearOn", {
+          value: (delay) => {
+            let l = delay ? delayListeners : atonceListeners;
+            delayDispatcher.count -= l.size;
+            if (delay && delayDispatcher?.delayListeners) {
+              l.forEach((_, listener) => {
+                delayDispatcher.delayListeners.delete(listener);
+              });
+            }
+            l.clear();
+            // for (let p in obj) {
+            //   obj[p].clearOn?.(delay)
+            // }
+          },
+        });
+        Object.defineProperty(obj, "dispose", {
+          value: () => {
+            obj.clearOn(false);
+            obj.clearOn(true);
+          },
+        });
+        Object.defineProperty(obj, "hasOn", {
+          value: (prop, delay = false) => {
+            let l = delay ? delayListeners : atonceListeners;
+            return l.has(prop);
+          },
+        });
+
+        Object.defineProperty(obj, "raise", {
+          value: (prop, newValue, oldValue, delay = false) => {
+            if (prop !== thisProp) {
+              obj.raise(thisProp, obj, obj, delay);
+            }
+            let l = delay ? delayListeners : atonceListeners;
+            if (!l.has(prop)) {
+              return;
+            }
+            for (const [listener, _] of l.get(prop)) {
+              listener(newValue, oldValue);
+            }
+          },
+        });
+      };
+
+      const registerElement = (tagName, /**@type { string } */ constructor) => {
+        const elementClassName = `HTML${
+          constructor || getNameFromTagName(tagName)
+        }Element`;
+        constructor = constructor || "Object";
+        eval(`
+    class ${elementClassName} extends HTMLElement{
+      constructor(){
+        super()
+        const shadow = this.attachShadow({mode:'open'})
+        const template = document.getElementById('${tagName}')
+        if(!template || template.tagName !== 'TEMPLATE' ){
+          throw new Error('Define Template')
+        }
+        this.template_ = template
+        this.shadow_ = shadow
+        this.model_ = new ${constructor}()
+        this.model_.components = { host: this.shadow_ }
+        if(this.context && this.hasAttribute('model.')){
+          const modeExp = this.getAttribute('model.')
+          this.model = evalInContext(modeExp, this.context)
+        }else if(this.modelBeforeInit){
+          this.model = this.modelBeforeInit
+        }else{
+          this.model =  {}
+        }
+      }
+
+      rebuildView(){
+        this.shadow_.innerHTML = ''
+        const instance = document.importNode(this.template_.content, true)
+        this.shadow_.appendChild(instance)
+      }
+  
+      get model(){
+        return this.model_
+      }
+  
+      set model(value){
+        if(value?.on){
+          this.model_ = value || {}
+          this.model_.components = { host: this.shadow_ , ...this.model_.components||{}}
+        }else{
+          //combine code behind with model
+          Object.assign(this.model_, value)
+        }
+        this.shadow_.context = this.model_ 
+        this.rebuildView()
+      }
+  
+      updateModel(value){
+        this.model = value
+        this.connectedCallback()
+      }
+      
+      connectedCallback(){
+        binding(this.shadow_)
+        if(this.model_.launch){
+          this.model_.launch()
+        } 
+      }
+    }
+    customElements.define('${tagName}', ${elementClassName})
+    `);
+      };
+      return {
+        registerElement,
+        registerProperties,
+        evalInContext,
+        delayDispatcher,
+      };
+    })();
+
+    const sleep = (timeout) =>
+      new Promise((resolve) => setTimeout(resolve, timeout));
+
+    class AppBase {
+      async launch() {
+        if (this.launched) {
+          return;
+        }
+        this.launched = true;
+        this.storage = this.initStorage_();
+        this.data = await this.initData(window.appData);
+        window.app = this;
+        await this.start();
+      }
+
+      async registerStorageProperties(...props) {
+        if (!this.storage) {
+          return;
+        }
+        let asyncTimeout = 50;
+        const bgTimeout = 200;
+        for (const [prop, defaultValue, onchange] of props) {
+          let propValue;
+          let valueModified = false;
+          let successLoadFromStorage = false;
+          let loadFunc;
+          let bgLoad = false;
+          const mergeValue = (savedValue) => {
+            if (successLoadFromStorage) {
+              return;
+            }
+            successLoadFromStorage = true;
+            if (!valueModified) {
+              valueModified = true;
+              propValue = savedValue;
+            } else {
+              // merge strategy
+              propValue = savedValue;
+            }
+            if (bgLoad && onchange) {
+              onchange();
+            }
+          };
+          loadFunc = async () => {
+            const jsonStr = await this.storage.getItem(prop);
+            let savedValue;
+            if (!jsonStr) {
+              savedValue = defaultValue;
+            } else {
+              try {
+                savedValue = JSON.parse(jsonStr);
+              } catch {
+                savedValue = defaultValue;
+              }
+            }
+            mergeValue(savedValue);
+          };
+          const tryLoad = async () => {
+            bgLoad = true;
+            const func = loadFunc;
+            loadFunc = null;
+            await Promise.race([
+              func(),
+              sleep(bgTimeout).then(() => {
+                if (!successLoadFromStorage) {
+                  loadFunc = func;
+                }
+              }),
+            ]);
+          };
+          await Promise.race([
+            loadFunc(),
+            sleep(asyncTimeout).then(() => {
+              if (!valueModified) {
+                propValue = defaultValue;
+                valueModified = true;
+                asyncTimeout = 0;
+              }
+            }),
+          ]);
+          Object.defineProperty(this, prop, {
+            get() {
+              if (loadFunc) {
+                tryLoad();
+              }
+              return propValue;
+            },
+            set(newValue) {
+              propValue = newValue;
+              if (successLoadFromStorage) {
+                this.storage.setItem(prop, JSON.stringify(propValue));
+              }
+            },
+          });
+        }
+      }
+
+      initStorage_() {
+        if (window.$localStorage) {
+          return window.$localStorage;
+        }
+        try {
+          const s = window.localStorage;
+          return s;
+        } catch {
+          return {
+            getItem: () => "",
+            setItem: () => true,
+          };
+        }
+      }
+
+      async initData(data) {
+        return data;
+      }
+
+      async start() {
+        console.log("start");
+      }
+
+      async pause() {
+        console.log("pause");
+      }
+
+      async resume() {
+        console.log("pause");
+      }
+
+      async stop() {
+        console.log("stop");
+      }
+    }
+
+    window.onload = async () => {
+      let currentClass = App;
+      while (true) {
+        let baseClass = Object.getPrototypeOf(currentClass);
+        if (
+          !baseClass ||
+          Object.getPrototypeOf(Object) === Object.getPrototypeOf(currentClass)
+        ) {
+          break;
+        }
+        currentClass = baseClass;
+      }
+      Object.setPrototypeOf(currentClass.prototype, AppBase.prototype);
+      for (const template of document.querySelectorAll(
+        "template[id][view-model]"
+      )) {
+        const tagName = template.getAttribute("id");
+        if (!tagName) {
+          continue;
+        }
+        const codeBehind = template.getAttribute("view-model");
+        registerElement(tagName, codeBehind);
+      }
+      delayDispatcher.start();
+    };
+  </script>
+
+  <style>
+    html,
+    body {
+      height: 100%;
+      margin: 0;
+    }
+  </style>
+
+  <body>
+    <app-main></app-main>
+
+    <template id="h-stack" view-model>
+      <slot></slot>
+      <style>
+        :host {
+          display: flex;
+          flex-direction: row;
+        }
+      </style>
+    </template>
+    <template id="v-stack" view-model>
+      <slot></slot>
+      <style>
+        :host {
+          display: flex;
+          flex-direction: column;
+        }
+      </style>
+    </template>
+    <template id="hv-stack" view-model>
+      <slot></slot>
+      <style>
+        :host {
+          display: flex;
+          flex-direction: column;
+        }
+
+        @media (orientation: landscape) {
+          :host {
+            flex-direction: row;
+          }
+        }
+      </style>
+    </template>
+
+    <template id="vh-stack" view-model>
+      <slot></slot>
+      <style>
+        :host {
+          display: flex;
+          flex-direction: row;
+        }
+
+        @media (orientation: landscape) {
+          :host {
+            flex-direction: column;
+          }
+        }
+      </style>
+    </template>
+
+    <template id="h-square" view-model>
+      <slot></slot>
+      <style>
+        :host {
+          width: 100vw;
+          height: 100vw;
+        }
+
+        @media (orientation: landscape) {
+          :host {
+            width: 100vh;
+            height: 100vh;
+          }
+        }
+      </style>
+    </template>
+
+    <template id="h-spacer" view-model>
+      <slot></slot>
+      <style>
+        :host {
+          flex: 1;
+          display: flex;
+        }
+      </style>
+    </template>
+
+    <template id="h-text" view-model>
+      <span inner-text$.="content"></span>
+      <style>
+        :host {
+          flex: 1;
+          display: flex;
+          align-items: center;
+          place-content: center;
+        }
+      </style>
+    </template>
+
+    <template id="play-button" view-model>
+      <span id="btnPlay" class="play-button" class-pause.="isPlaying"></span>
+      <style>
+        :host {
+          display: block;
+          border-radius: 5px;
+          padding: 3px 10px;
+          background-color: #fff4;
+        }
+
+        .play-button {
+          display: block;
+          width: 100%;
+          height: 100%;
+          background-color: var(--color);
+          clip-path: polygon(25% 10%, 25% 90%, 95% 50%, 25% 10%);
+          transition: 200ms all ease-in-out;
+        }
+
+        .play-button.pause {
+          clip-path: polygon(
+            60% 50%,
+            20% 20%,
+            20% 80%,
+            60% 50%,
+            60% 80%,
+            80% 80%,
+            80% 20%,
+            60% 20%
+          );
+        }
+      </style>
+    </template>
+
+    <template id="menu-bar" view-model>
+      <h-stack>
+        <div class-hidden.="!item.show" class="menu-item" for.="item of menus">
+          <span inner-text$.="item.name" onclick.="item.onclick()"></span>
+        </div>
+      </h-stack>
+      <style>
+        :host {
+          display: block;
+        }
+
+        h-stack {
+          overflow: hidden;
+        }
+
+        .menu-item {
+          margin: 5px;
+          background-color: var(--menu-background-color);
+          border-radius: 4px;
+          padding: 2px 5px;
+          color: var(--menu-color);
+          display: flex;
+          justify-content: center;
+          flex: 1;
+        }
+
+        .menu-item > span {
+          display: block;
+          text-overflow: ellipsis;
+          white-space: pre;
+          overflow: hidden;
+          max-width: 6em;
+        }
+
+        .hidden {
+          display: none;
+        }
+      </style>
+    </template>
+
+    <script>
+      class MenuItem {
+        constructor(name = "", onclick = null, show = true) {
+          registerProperties(this, "name", "show");
+          this.name = name;
+          this.show = show;
+          this.onclick = onclick;
+        }
+      }
+    </script>
+
+    <template id="modal-panel" view-model="Modal">
+      <div>
+        <span
+          class="toastMessage"
+          if.="toastMessage"
+          inner-text$.="toastMessage"
+        ></span>
+        <div if.="open" class="modal-wraper" onclick.="close()">
+          <div class="modal" onclick="event.stopPropagation()">
+            <div class="title">
+              <span inner-text$.="title"></span>
+            </div>
+            <div class="body">
+              <div if.="items?.length">
+                <div
+                  class="item"
+                  for.="item of items"
+                  class-highlight.="item === selectedItem"
+                  onclick.="close(item)"
+                >
+                  <span
+                    inner-text$.="options.itemName?item[options.itemName]:item"
+                  ></span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <style>
+        .hidden {
+          /* left: -100%; */
+          /* transition: ease-in-out 0.05s left; */
+          display: none;
+        }
+
+        .toastMessage {
+          color: var(--toast-color, #eee);
+          background-color: var(--toast-background-color, #0008);
+          position: fixed;
+          bottom: 0;
+          margin: 20px auto;
+          left: 50%;
+          transform: translate(-50%, 0);
+          padding: 5px 20px;
+          border-radius: 4px;
+          text-align: center;
+          backdrop-filter: blur(5px);
+        }
+
+        .modal-wraper {
+          position: absolute;
+          top: 0;
+          left: 0;
+          width: 100%;
+          height: 100%;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+        }
+
+        .modal {
+          background: #fff;
+          border-radius: 10px;
+          padding: 10px;
+          width: 90%;
+          max-height: 90%;
+          box-shadow: 3px 3px 5px;
+        }
+
+        .modal .title {
+          font-size: large;
+          margin: 5px 0;
+          font-weight: bold;
+        }
+
+        .modal .body {
+          margin: 5px 0;
+        }
+
+        .modal .foot {
+          margin: 5px 0;
+        }
+
+        .item {
+          margin: 8px 0;
+          background: #0002;
+          padding: 5px;
+          border-radius: 8px;
+        }
+
+        .item.highlight {
+          background: #0008;
+          color: white;
+        }
+      </style>
+    </template>
+    <script>
+      class Modal {
+        constructor() {
+          /**@type { Object.<string,HTMLElement> } */
+          this.components;
+          /**@type { Storage | {  } } */
+          this.storage;
+          registerProperties(
+            this,
+            "toastMessage",
+            "title",
+            "items",
+            "selectedItem",
+            "open",
+            "options"
+          );
+        }
+        toast(/**@string */ msg, /**@type number */ timeout = 1000, task) {
+          return new Promise(async (resolve) => {
+            this.toastMessage = msg;
+            await task;
+            setTimeout(() => {
+              this.toastMessage = null;
+              resolve();
+            }, timeout);
+          });
+        }
+
+        close(result) {
+          if (!this.resolveTask) {
+            return;
+          }
+          if (this.options.requilred && !result) {
+            return;
+          }
+          this.open = undefined;
+          this.resolveTask.resolve(result);
+        }
+
+        select(
+          /** @type string */ msg,
+          /** @type [any] */ values = [],
+          defaultIdx = 0,
+          opt = undefined
+        ) {
+          if (this.resolveTask) {
+            const { resolve, reject } = this.resolveTask;
+            this.resolveTask = undefined;
+            reject();
+          }
+          this.title = msg;
+          this.items = values;
+          this.selectedItem = values[defaultIdx];
+          this.options = opt || {};
+          this.open = true;
+          return new Promise(
+            (resolve, reject) => (this.resolveTask = { resolve, reject })
+          );
+        }
+      }
+    </script>
+    <template id="pop-up" view-model="Popup">
+      <div class="popup">
+        <slot></slot>
+      </div>
+      <style>
+        :host {
+          display: block;
+          position: relative;
+          left: 0;
+          top: 0;
+          bottom: 0;
+          right: 0;
+          position: fixed;
+          background: #0008;
+          backdrop-filter: blur(5px);
+        }
+
+        .popup {
+          max-width: 99%;
+          max-height: 99%;
+          position: absolute;
+          top: 50%;
+          left: 50%;
+          transform: translate(-50%, -50%);
+        }
+      </style>
+    </template>
+    <script>
+      class Popup {}
+    </script>
+  </body>
+</html>
